@@ -6,6 +6,7 @@ from .moments import Moment, MomentConfig, MomentGenerator, TrackObservation, ge
 from .pipeline import VideoSemanticSearch
 from .types import TranscriptSegment, VideoChunk, VideoTranscript
 from .video_cycle import (
+    VLMCaptionConfig,
     VideoManifest,
     build_keyframe_targets,
     convert_bytetrack_mot_file,
@@ -13,7 +14,9 @@ from .video_cycle import (
     build_prompt_terms,
     canonicalize_label,
     cosine_search_moments,
+    extract_chat_completion_text,
     extract_object_nouns,
+    generate_vlm_captions,
     normalize_tracking_rows,
     run_video_cycle,
     video_fps,
@@ -23,6 +26,7 @@ __all__ = [
     "BaseEmbedder",
     "ChunkConfig",
     "HashingEmbedder",
+    "VLMCaptionConfig",
     "VideoManifest",
     "Moment",
     "MomentConfig",
@@ -35,7 +39,9 @@ __all__ = [
     "build_prompt_terms",
     "canonicalize_label",
     "cosine_search_moments",
+    "extract_chat_completion_text",
     "extract_object_nouns",
+    "generate_vlm_captions",
     "normalize_tracking_rows",
     "run_video_cycle",
     "video_fps",

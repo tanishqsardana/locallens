@@ -4,7 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
-from .video_cycle import convert_bytetrack_mot_file, run_video_cycle, video_fps
+from .video_cycle import (
+    VLMCaptionConfig,
+    convert_bytetrack_mot_file,
+    run_video_cycle,
+    video_fps,
+)
 
 
 def _parse_seed_labels(value: str | None) -> list[str]:
@@ -40,6 +45,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--out-dir", default="data/video_cycle", help="Output directory")
     parser.add_argument("--captions", default=None, help="Optional VLM captions JSON path")
+    parser.add_argument(
+        "--auto-captions",
+        action="store_true",
+        help="Generate captions from sampled frames via OpenAI-compatible VLM endpoint",
+    )
+    parser.add_argument(
+        "--vlm-endpoint",
+        default="http://localhost:8000/v1/chat/completions",
+        help="OpenAI-compatible chat completions endpoint",
+    )
+    parser.add_argument(
+        "--vlm-model",
+        default="Qwen/Qwen2.5-VL-7B-Instruct",
+        help="VLM model name served by the endpoint",
+    )
+    parser.add_argument(
+        "--vlm-prompt",
+        default="List all visible traffic objects in this traffic frame in one short sentence.",
+        help="Prompt sent with each frame",
+    )
+    parser.add_argument("--vlm-max-tokens", type=int, default=120, help="Max caption tokens")
+    parser.add_argument("--vlm-frame-stride", type=int, default=10, help="Caption every N sampled frames")
+    parser.add_argument("--vlm-timeout-sec", type=float, default=60.0, help="VLM request timeout")
+    parser.add_argument("--vlm-temperature", type=float, default=0.0, help="VLM sampling temperature")
+    parser.add_argument("--vlm-api-key", default=None, help="Optional bearer token for VLM endpoint")
     parser.add_argument("--synonyms", default=None, help="Optional synonym map JSON path")
     parser.add_argument(
         "--seed-labels",
@@ -73,6 +103,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.captions and args.auto_captions:
+        raise ValueError("Use either --captions or --auto-captions, not both")
+
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -95,11 +128,26 @@ def main() -> int:
     else:
         raise ValueError("Provide either --tracks or --bytetrack-txt")
 
+    vlm_config = None
+    if args.auto_captions:
+        vlm_config = VLMCaptionConfig(
+            endpoint=args.vlm_endpoint,
+            model=args.vlm_model,
+            prompt=args.vlm_prompt,
+            max_tokens=int(args.vlm_max_tokens),
+            frame_stride=int(args.vlm_frame_stride),
+            timeout_sec=float(args.vlm_timeout_sec),
+            temperature=float(args.vlm_temperature),
+            api_key=args.vlm_api_key,
+        )
+        vlm_config.validate()
+
     summary = run_video_cycle(
         video_path=args.video,
         tracks_path=tracks_path,
         output_dir=out_dir,
         captions_path=args.captions,
+        vlm_caption_config=vlm_config,
         synonyms_path=args.synonyms,
         seed_labels=_parse_seed_labels(args.seed_labels),
         target_fps=args.target_fps,

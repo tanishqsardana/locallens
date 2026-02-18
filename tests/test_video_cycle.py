@@ -10,6 +10,7 @@ from videosearch.video_cycle import (
     build_keyframe_targets,
     build_prompt_terms,
     convert_bytetrack_mot_rows,
+    extract_chat_completion_text,
     extract_object_nouns,
     normalize_tracking_rows,
 )
@@ -142,8 +143,10 @@ class VideoCycleHelpersTest(unittest.TestCase):
             index_db_path="/tmp/does_not_exist.sqlite",
             synonym_map={"automobile": "car"},
             captions=["a car drives", "the car stops"],
+            caption_rows=[{"frame_idx": 0, "caption": "a car drives"}],
             discovered_labels=["car"],
             prompt_terms=["car"],
+            phase2_status="provided_captions",
             include_full=False,
             preview_limit=1,
         )
@@ -163,8 +166,10 @@ class VideoCycleHelpersTest(unittest.TestCase):
             index_db_path="/tmp/does_not_exist.sqlite",
             synonym_map={"automobile": "car"},
             captions=["a car drives", "the car stops"],
+            caption_rows=[{"frame_idx": 0, "caption": "a car drives"}],
             discovered_labels=["car"],
             prompt_terms=["car"],
+            phase2_status="provided_captions",
             include_full=True,
             preview_limit=1,
         )
@@ -189,6 +194,19 @@ class VideoCycleHelpersTest(unittest.TestCase):
         self.assertEqual(converted[0]["bbox"], [100.0, 200.0, 150.0, 280.0])
         self.assertEqual(converted[1]["frame_idx"], 1)
         self.assertEqual(converted[1]["class"], "car")
+
+    def test_extract_chat_completion_text(self) -> None:
+        response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": "The frame shows a red car and a white SUV."
+                    }
+                }
+            ]
+        }
+        text = extract_chat_completion_text(response)
+        self.assertEqual(text, "The frame shows a red car and a white SUV.")
 
 
 if __name__ == "__main__":

@@ -151,6 +151,21 @@ PYTHONPATH=src python -m videosearch.video_cycle_cli \
   --show-phase-outputs
 ```
 
+Auto-generate captions from a local vLLM VLM endpoint (OpenAI-compatible):
+
+```bash
+PYTHONPATH=src python -m videosearch.video_cycle_cli \
+  --video /path/to/video.mp4 \
+  --bytetrack-txt /path/to/bytetrack_results.txt \
+  --out-dir data/video_cycle_run \
+  --auto-captions \
+  --vlm-endpoint http://localhost:8000/v1/chat/completions \
+  --vlm-model Qwen/Qwen2.5-VL-7B-Instruct \
+  --vlm-frame-stride 10 \
+  --vlm-max-tokens 120 \
+  --show-phase-outputs
+```
+
 If you already ran ByteTrack and have MOT txt output:
 
 ```bash
@@ -166,6 +181,7 @@ Pipeline artifacts:
 - `data/video_cycle_run/ingest/video_manifest.json`
 - `data/video_cycle_run/ingest/sampled_frames.json`
 - `data/video_cycle_run/vocabulary.json` (if captions are provided)
+- `data/video_cycle_run/vlm_captions_generated.json` (if `--auto-captions` is used)
 - `data/video_cycle_run/normalized_tracks.json`
 - `data/video_cycle_run/moments.json`
 - `data/video_cycle_run/moment_keyframes.json`
@@ -196,6 +212,7 @@ Each row must contain equivalents of:
 
 `--tracks` and `--bytetrack-txt` are mutually exclusive.
 Provide one of them.
+`--captions` and `--auto-captions` are mutually exclusive.
 
 ## Moment Generation (Tracking Output -> Events)
 

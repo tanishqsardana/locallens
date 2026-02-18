@@ -239,6 +239,10 @@ def _render_cycle_inspector() -> None:
         st.subheader("Vocabulary")
         st.write(f"Status: `{p2.get('status', 'unknown')}`")
         st.write(f"Captions count: `{p2.get('captions_count', 0)}`")
+        caption_rows = _as_rows(p2.get("caption_rows"))
+        if caption_rows:
+            st.write("Caption rows:")
+            st.dataframe(caption_rows, use_container_width=True)
         st.write("Discovered labels:")
         st.code(", ".join(p2.get("discovered_labels", [])) or "(none)")
         st.write("Prompt terms:")

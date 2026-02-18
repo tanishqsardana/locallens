@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections import Counter
 from dataclasses import asdict, dataclass
 import json
@@ -7,6 +8,8 @@ from pathlib import Path
 import re
 import sqlite3
 from typing import Any, Iterable, Mapping, Sequence
+from urllib import error as url_error
+from urllib import request as url_request
 
 import numpy as np
 
@@ -59,6 +62,32 @@ class KeyframeRecord:
     frame_idx: int
     time_sec: float
     image_path: str
+
+
+@dataclass(slots=True)
+class VLMCaptionConfig:
+    endpoint: str = "http://localhost:8000/v1/chat/completions"
+    model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
+    prompt: str = "List all visible traffic objects in this traffic frame in one short sentence."
+    max_tokens: int = 120
+    frame_stride: int = 10
+    timeout_sec: float = 60.0
+    temperature: float = 0.0
+    api_key: str | None = None
+
+    def validate(self) -> None:
+        if not self.endpoint.strip():
+            raise ValueError("VLM endpoint cannot be empty")
+        if not self.model.strip():
+            raise ValueError("VLM model cannot be empty")
+        if not self.prompt.strip():
+            raise ValueError("VLM prompt cannot be empty")
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be > 0")
+        if self.frame_stride <= 0:
+            raise ValueError("frame_stride must be > 0")
+        if self.timeout_sec <= 0:
+            raise ValueError("timeout_sec must be > 0")
 
 
 def _ensure_cv2() -> Any:
@@ -286,6 +315,129 @@ def extract_object_nouns(
 
     nouns = [term for term, freq in counts.most_common(top_k) if freq >= min_count]
     return nouns
+
+
+def _image_to_data_url(image_path: str | Path) -> str:
+    path = Path(image_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Image not found: {path}")
+    image_bytes = path.read_bytes()
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    suffix = path.suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        mime = "image/jpeg"
+    elif suffix == ".png":
+        mime = "image/png"
+    elif suffix == ".webp":
+        mime = "image/webp"
+    else:
+        mime = "image/jpeg"
+    return f"data:{mime};base64,{b64}"
+
+
+def extract_chat_completion_text(response_payload: Mapping[str, Any]) -> str:
+    """
+    Parse OpenAI-compatible chat completion payload text.
+    """
+    choices = response_payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        return ""
+    message = first.get("message")
+    if not isinstance(message, Mapping):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        text_parts: list[str] = []
+        for item in content:
+            if not isinstance(item, Mapping):
+                continue
+            if item.get("type") == "text" and isinstance(item.get("text"), str):
+                text_parts.append(item["text"].strip())
+        return " ".join(part for part in text_parts if part).strip()
+    return ""
+
+
+def _call_vlm_caption(config: VLMCaptionConfig, image_path: str | Path) -> tuple[str, dict[str, Any]]:
+    image_data_url = _image_to_data_url(image_path)
+    payload = {
+        "model": config.model,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": config.prompt},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ],
+            }
+        ],
+        "max_tokens": int(config.max_tokens),
+        "temperature": float(config.temperature),
+    }
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if config.api_key:
+        headers["Authorization"] = f"Bearer {config.api_key}"
+
+    request = url_request.Request(
+        config.endpoint,
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with url_request.urlopen(request, timeout=float(config.timeout_sec)) as response:
+            raw = response.read().decode("utf-8")
+    except url_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"VLM request failed with HTTP {exc.code}: {detail[:300]}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(f"VLM request failed: {exc}") from exc
+
+    parsed = json.loads(raw)
+    text = extract_chat_completion_text(parsed)
+    return text, parsed
+
+
+def generate_vlm_captions(
+    sampled_rows: Sequence[Mapping[str, Any]],
+    config: VLMCaptionConfig,
+) -> list[dict[str, Any]]:
+    """
+    Caption sampled frames through an OpenAI-compatible VLM endpoint.
+    """
+    config.validate()
+    out: list[dict[str, Any]] = []
+    stride = max(1, int(config.frame_stride))
+
+    for idx, row in enumerate(sampled_rows):
+        if idx % stride != 0:
+            continue
+        frame_idx = int(row.get("frame_idx", 0))
+        time_sec = float(row.get("time_sec", 0.0))
+        image_path = row.get("image_path")
+        if not isinstance(image_path, str):
+            continue
+
+        entry: dict[str, Any] = {
+            "frame_idx": frame_idx,
+            "time_sec": time_sec,
+            "image_path": image_path,
+            "caption": "",
+        }
+        try:
+            caption, _ = _call_vlm_caption(config, image_path)
+            entry["caption"] = caption
+        except Exception as exc:
+            entry["error"] = str(exc)
+        out.append(entry)
+    return out
 
 
 def load_captions(path: str | Path) -> list[str]:
@@ -659,8 +811,10 @@ def build_phase_outputs(
     index_db_path: str | Path,
     synonym_map: Mapping[str, str],
     captions: Sequence[str] | None,
+    caption_rows: Sequence[Mapping[str, Any]] | None,
     discovered_labels: Sequence[str],
     prompt_terms: Sequence[str],
+    phase2_status: str,
     include_full: bool = False,
     preview_limit: int = 25,
 ) -> dict[str, Any]:
@@ -684,9 +838,14 @@ def build_phase_outputs(
             "sampled_frame_count": len(sampled_rows),
         },
         "phase_2_vocabulary": {
-            "status": "applied" if captions else "skipped_no_captions",
+            "status": phase2_status,
             "captions_count": len(captions),
             "captions": list(captions if include_full else captions[:preview_limit]),
+            "caption_rows": _slice_for_report(
+                list(caption_rows or []),
+                include_full=include_full,
+                preview_limit=preview_limit,
+            ),
             "synonym_map": dict(synonym_map),
             "discovered_labels": list(discovered_labels),
             "prompt_terms": list(prompt_terms),
@@ -745,6 +904,8 @@ def run_video_cycle(
     seed_labels: Sequence[str] | None = None,
     target_fps: float = 10.0,
     moment_overrides: Mapping[str, Any] | None = None,
+    vlm_caption_config: VLMCaptionConfig | None = None,
+    captions_output_path: str | Path | None = None,
     include_full_phase_outputs: bool = False,
     phase_preview_limit: int = 25,
 ) -> dict[str, Any]:
@@ -763,9 +924,42 @@ def run_video_cycle(
 
     prompts: list[str] = []
     discovered: list[str] = []
+    caption_rows: list[dict[str, Any]] = []
     captions: list[str] = []
+    phase2_status = "skipped_no_captions"
+    effective_captions_path: str | Path | None = captions_path
+
     if captions_path:
         captions = load_captions(captions_path)
+        phase2_status = "provided_captions"
+    elif vlm_caption_config:
+        caption_rows = generate_vlm_captions(sampled_rows=sampled_rows, config=vlm_caption_config)
+        effective_captions_path = captions_output_path or (out_dir / "vlm_captions_generated.json")
+        effective_captions_file = Path(effective_captions_path)
+        effective_captions_file.parent.mkdir(parents=True, exist_ok=True)
+        effective_captions_file.write_text(
+            json.dumps(
+                {
+                    "captions": caption_rows,
+                    "vlm": {
+                        "endpoint": vlm_caption_config.endpoint,
+                        "model": vlm_caption_config.model,
+                        "prompt": vlm_caption_config.prompt,
+                        "max_tokens": vlm_caption_config.max_tokens,
+                        "frame_stride": vlm_caption_config.frame_stride,
+                        "timeout_sec": vlm_caption_config.timeout_sec,
+                        "temperature": vlm_caption_config.temperature,
+                    },
+                },
+                indent=2,
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        captions = [row["caption"] for row in caption_rows if isinstance(row.get("caption"), str) and row["caption"].strip()]
+        phase2_status = "generated_vlm_captions"
+
+    if captions:
         discovered = extract_object_nouns(captions, min_count=1, top_k=128)
         prompts = build_prompt_terms(seed_labels or [], discovered, synonym_map)
         (out_dir / "vocabulary.json").write_text(
@@ -829,8 +1023,10 @@ def run_video_cycle(
         index_db_path=db_path,
         synonym_map=synonym_map,
         captions=captions,
+        caption_rows=caption_rows,
         discovered_labels=discovered,
         prompt_terms=prompts,
+        phase2_status=phase2_status,
         include_full=include_full_phase_outputs,
         preview_limit=phase_preview_limit,
     )
@@ -847,6 +1043,7 @@ def run_video_cycle(
         "keyframes": str(out_dir / "moment_keyframes.json"),
         "moment_index_db": str(db_path),
         "phase_outputs": str(phase_outputs_path),
+        "captions": str(effective_captions_path) if effective_captions_path else None,
         "counts": {
             "tracks": len(normalized),
             "moments": len(moment_rows),
@@ -854,7 +1051,7 @@ def run_video_cycle(
             "embeddings": len(embeddings),
         },
     }
-    if captions_path:
+    if captions:
         summary["vocabulary"] = str(out_dir / "vocabulary.json")
     (out_dir / "run_summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=True),
