@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from videosearch.video_cycle import (
+    DetectionTrackingConfig,
     TrackProcessingConfig,
     VideoManifest,
     build_phase_outputs,
@@ -14,9 +15,11 @@ from videosearch.video_cycle import (
     convert_bytetrack_mot_rows,
     extract_chat_completion_text,
     extract_object_nouns,
+    normalize_detection_rows,
     normalize_tracking_rows,
     parse_vocab_postprocess_output,
     process_tracking_rows,
+    track_detections,
 )
 
 
@@ -79,6 +82,54 @@ class VideoCycleHelpersTest(unittest.TestCase):
         self.assertEqual(len(normalized), 2)
         self.assertEqual(normalized[0]["class"], "car")
         self.assertEqual(normalized[1]["class"], "truck")
+
+    def test_normalize_detection_rows(self) -> None:
+        rows = [
+            {
+                "label": "automobiles",
+                "xyxy": [10, 20, 30, 40],
+                "score": 0.91,
+                "frame": 15,
+                "timestamp": 0.5,
+            },
+            {
+                "class": "truck",
+                "bbox": [11, 21, 31, 41],
+                "confidence": 0.88,
+                "frame_idx": 16,
+                "time_sec": 0.6,
+            },
+        ]
+        normalized = normalize_detection_rows(
+            rows,
+            synonym_map={"automobile": "car"},
+            allowed_labels={"car", "truck"},
+        )
+        self.assertEqual(len(normalized), 2)
+        self.assertEqual(normalized[0]["class"], "car")
+        self.assertEqual(normalized[1]["class"], "truck")
+
+    def test_track_detections_assigns_ids(self) -> None:
+        detections = [
+            {"class": "car", "bbox": [10, 10, 20, 20], "confidence": 0.9, "frame_idx": 0, "time_sec": 0.0},
+            {"class": "car", "bbox": [11, 10, 21, 20], "confidence": 0.9, "frame_idx": 1, "time_sec": 0.1},
+            {"class": "truck", "bbox": [50, 50, 70, 70], "confidence": 0.95, "frame_idx": 1, "time_sec": 0.1},
+            {"class": "car", "bbox": [12, 10, 22, 20], "confidence": 0.9, "frame_idx": 2, "time_sec": 0.2},
+        ]
+        tracked, report = track_detections(
+            detections,
+            config=DetectionTrackingConfig(
+                iou_threshold=0.3,
+                max_missed_frames=5,
+                min_detection_confidence=0.0,
+                class_aware=True,
+            ),
+            fps=10.0,
+        )
+        self.assertEqual(len(tracked), 4)
+        self.assertGreaterEqual(report["track_count"], 2)
+        car_track_ids = [row["track_id"] for row in tracked if row["class"] == "car"]
+        self.assertEqual(len(set(car_track_ids)), 1)
 
     def test_process_tracking_rows_filters_and_interpolates(self) -> None:
         rows = [

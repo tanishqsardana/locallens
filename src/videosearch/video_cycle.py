@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -128,6 +128,22 @@ class TrackProcessingConfig:
             raise ValueError("min_track_length_frames must be > 0")
         if self.max_interp_gap_frames < 0:
             raise ValueError("max_interp_gap_frames must be >= 0")
+
+
+@dataclass(slots=True)
+class DetectionTrackingConfig:
+    iou_threshold: float = 0.3
+    max_missed_frames: int = 10
+    min_detection_confidence: float = 0.0
+    class_aware: bool = True
+
+    def validate(self) -> None:
+        if self.iou_threshold <= 0 or self.iou_threshold > 1:
+            raise ValueError("iou_threshold must be in (0, 1]")
+        if self.max_missed_frames < 0:
+            raise ValueError("max_missed_frames must be >= 0")
+        if self.min_detection_confidence < 0:
+            raise ValueError("min_detection_confidence must be >= 0")
 
 
 def _ensure_cv2() -> Any:
@@ -699,6 +715,178 @@ def postprocess_vocabulary_with_llm(
     }
 
 
+def _bbox_iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
+    ax1, ay1, ax2, ay2 = [float(v) for v in a]
+    bx1, by1, bx2, by2 = [float(v) for v in b]
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0.0, ix2 - ix1)
+    ih = max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    denom = area_a + area_b - inter
+    if denom <= 0:
+        return 0.0
+    return float(inter / denom)
+
+
+def normalize_detection_rows(
+    rows: Iterable[Mapping[str, Any]],
+    synonym_map: Mapping[str, str] | None = None,
+    allowed_labels: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Normalize frame-level detection rows into:
+    class, bbox, confidence, frame_idx, time_sec.
+    """
+    synonym_map = synonym_map or {}
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        label = row.get("class", row.get("label", row.get("class_name", row.get("cls"))))
+        bbox = row.get("bbox", row.get("xyxy"))
+        confidence = row.get("confidence", row.get("score", row.get("conf", 0.0)))
+        frame_idx = row.get("frame_idx", row.get("frame", row.get("frame_id")))
+        time_sec = row.get("time_sec", row.get("timestamp", row.get("time")))
+
+        if label is None or bbox is None or frame_idx is None:
+            continue
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+
+        clean_label = canonicalize_label(str(label), synonym_map)
+        if allowed_labels and clean_label not in allowed_labels:
+            continue
+
+        normalized.append(
+            {
+                "class": clean_label,
+                "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                "confidence": float(confidence),
+                "frame_idx": int(frame_idx),
+                "time_sec": float(time_sec) if time_sec is not None else 0.0,
+            }
+        )
+
+    normalized.sort(key=lambda row: (row["frame_idx"], row["time_sec"], row["class"]))
+    return normalized
+
+
+def track_detections(
+    detections: Sequence[Mapping[str, Any]],
+    *,
+    config: DetectionTrackingConfig,
+    fps: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Lightweight class-aware IoU tracker to assign track IDs from detections.
+    """
+    config.validate()
+    if fps <= 0:
+        fps = 30.0
+
+    input_rows = [dict(row) for row in detections]
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    removed_low_confidence_count = 0
+    for row in input_rows:
+        conf = float(row.get("confidence", 0.0))
+        if conf < config.min_detection_confidence:
+            removed_low_confidence_count += 1
+            continue
+        frame_idx = int(row.get("frame_idx", 0))
+        grouped[frame_idx].append(
+            {
+                "class": str(row.get("class", "object")),
+                "bbox": [float(v) for v in row["bbox"]],
+                "confidence": conf,
+                "frame_idx": frame_idx,
+                "time_sec": float(row.get("time_sec", frame_idx / fps)),
+            }
+        )
+
+    active_tracks: dict[int, dict[str, Any]] = {}
+    next_track_id = 1
+    assigned_rows: list[dict[str, Any]] = []
+
+    for frame_idx in sorted(grouped.keys()):
+        frame_dets = grouped[frame_idx]
+
+        stale_track_ids = [
+            track_id
+            for track_id, state in active_tracks.items()
+            if (frame_idx - int(state["last_frame_idx"])) > config.max_missed_frames
+        ]
+        for track_id in stale_track_ids:
+            del active_tracks[track_id]
+
+        candidate_pairs: list[tuple[float, int, int]] = []
+        track_ids = list(active_tracks.keys())
+        for det_idx, det in enumerate(frame_dets):
+            det_label = str(det["class"])
+            for track_id in track_ids:
+                state = active_tracks[track_id]
+                if config.class_aware and str(state["class"]) != det_label:
+                    continue
+                iou = _bbox_iou_xyxy(state["bbox"], det["bbox"])
+                if iou >= config.iou_threshold:
+                    candidate_pairs.append((iou, track_id, det_idx))
+
+        candidate_pairs.sort(key=lambda item: item[0], reverse=True)
+        used_tracks: set[int] = set()
+        used_dets: set[int] = set()
+        matched: dict[int, int] = {}
+        for _, track_id, det_idx in candidate_pairs:
+            if track_id in used_tracks or det_idx in used_dets:
+                continue
+            used_tracks.add(track_id)
+            used_dets.add(det_idx)
+            matched[det_idx] = track_id
+
+        for det_idx, det in enumerate(frame_dets):
+            track_id = matched.get(det_idx)
+            if track_id is None:
+                track_id = next_track_id
+                next_track_id += 1
+                active_tracks[track_id] = {
+                    "class": det["class"],
+                    "bbox": det["bbox"],
+                    "last_frame_idx": frame_idx,
+                    "hit_count": 1,
+                }
+            else:
+                state = active_tracks[track_id]
+                state["bbox"] = det["bbox"]
+                state["last_frame_idx"] = frame_idx
+                state["hit_count"] = int(state.get("hit_count", 0)) + 1
+
+            assigned_rows.append(
+                {
+                    "track_id": int(track_id),
+                    "class": str(det["class"]),
+                    "bbox": [float(v) for v in det["bbox"]],
+                    "confidence": float(det["confidence"]),
+                    "frame_idx": int(frame_idx),
+                    "time_sec": float(det.get("time_sec", frame_idx / fps)),
+                }
+            )
+
+    assigned_rows.sort(key=lambda row: (row["frame_idx"], row["time_sec"], row["track_id"]))
+    per_track_counts: Counter[int] = Counter(int(row["track_id"]) for row in assigned_rows)
+    report = {
+        "input_detection_row_count": len(input_rows),
+        "removed_low_confidence_count": removed_low_confidence_count,
+        "tracked_detection_row_count": len(assigned_rows),
+        "track_count": len(per_track_counts),
+        "track_length_stats": _track_length_stats(list(per_track_counts.values())),
+        "config": asdict(config),
+    }
+    return assigned_rows, report
+
+
 def _clamp_bbox_to_frame(bbox: Sequence[float], frame_width: int, frame_height: int) -> list[float]:
     x1, y1, x2, y2 = [float(value) for value in bbox]
     max_x = float(max(1, frame_width))
@@ -1199,6 +1387,9 @@ def build_phase_outputs(
     discovered_labels: Sequence[str],
     prompt_terms: Sequence[str],
     phase2_status: str,
+    track_source: str = "tracks_json",
+    tracked_rows: Sequence[Mapping[str, Any]] | None = None,
+    detection_tracking_report: Mapping[str, Any] | None = None,
     canonicalized_tracks: Sequence[Mapping[str, Any]] | None = None,
     track_processing_report: Mapping[str, Any] | None = None,
     llm_vocab_postprocess: Mapping[str, Any] | None = None,
@@ -1239,10 +1430,13 @@ def build_phase_outputs(
             "llm_postprocess": dict(llm_vocab_postprocess or {}),
         },
         "phase_3_normalized_tracks": {
+            "track_source": track_source,
             "raw_track_row_count": len(raw_tracks),
+            "tracked_row_count": len(tracked_rows or raw_tracks),
             "canonicalized_track_row_count": len(canonicalized_tracks or []),
             "processed_track_row_count": len(normalized_tracks),
             "normalized_track_row_count": len(normalized_tracks),
+            "detection_tracking": dict(detection_tracking_report or {}),
             "track_processing": dict(track_processing_report or {}),
             "rows": _slice_for_report(
                 normalized_tracks,
@@ -1287,9 +1481,12 @@ def build_phase_outputs(
 
 def run_video_cycle(
     video_path: str | Path,
-    tracks_path: str | Path,
+    tracks_path: str | Path | None,
     output_dir: str | Path,
     *,
+    detections_path: str | Path | None = None,
+    detection_tracking_config: DetectionTrackingConfig | None = None,
+    tracked_rows_output_path: str | Path | None = None,
     captions_path: str | Path | None = None,
     synonyms_path: str | Path | None = None,
     seed_labels: Sequence[str] | None = None,
@@ -1306,7 +1503,8 @@ def run_video_cycle(
 ) -> dict[str, Any]:
     """
     End-to-end cycle:
-    ingest video -> bootstrap vocabulary -> normalize tracks -> generate moments
+    ingest video -> bootstrap vocabulary -> (optional) detection tracking
+    -> normalize/process tracks -> generate moments
     -> extract keyframes -> build embeddings -> persist SQLite index.
     """
     out_dir = Path(output_dir)
@@ -1408,9 +1606,48 @@ def run_video_cycle(
             encoding="utf-8",
         )
 
-    rows = load_json_rows(tracks_path)
+    if tracks_path and detections_path:
+        raise ValueError("Provide either tracks_path or detections_path, not both")
+    if not tracks_path and not detections_path:
+        raise ValueError("One of tracks_path or detections_path is required")
+
+    rows: list[dict[str, Any]]
+    track_source = "tracks_json"
+    tracked_rows: list[dict[str, Any]] | None = None
+    detection_tracking_report: dict[str, Any] | None = None
+
     allowed_labels = set(prompts) if prompts else None
-    canonicalized_tracks = normalize_tracking_rows(rows, synonym_map=synonym_map, allowed_labels=allowed_labels)
+    if detections_path:
+        track_source = "detections_iou_tracker"
+        detection_rows = load_json_rows(detections_path)
+        normalized_detections = normalize_detection_rows(
+            detection_rows,
+            synonym_map=synonym_map,
+            allowed_labels=allowed_labels,
+        )
+        effective_tracking_config = detection_tracking_config or DetectionTrackingConfig()
+        tracked_rows, detection_tracking_report = track_detections(
+            normalized_detections,
+            config=effective_tracking_config,
+            fps=manifest.fps,
+        )
+        effective_tracked_path = tracked_rows_output_path or (out_dir / "tracked_rows.json")
+        tracked_rows_file = Path(effective_tracked_path)
+        tracked_rows_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_rows_file.write_text(
+            json.dumps(tracked_rows, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        rows = tracked_rows
+    else:
+        rows = load_json_rows(tracks_path)
+        tracked_rows = rows
+
+    canonicalized_tracks = normalize_tracking_rows(
+        rows,
+        synonym_map=synonym_map,
+        allowed_labels=allowed_labels,
+    )
     effective_track_config = track_processing_config or TrackProcessingConfig()
     normalized, track_processing_report = process_tracking_rows(
         canonicalized_tracks,
@@ -1463,6 +1700,9 @@ def run_video_cycle(
         manifest=manifest,
         sampled_rows=sampled_rows,
         raw_tracks=rows,
+        tracked_rows=tracked_rows,
+        track_source=track_source,
+        detection_tracking_report=detection_tracking_report,
         normalized_tracks=normalized,
         canonicalized_tracks=canonicalized_tracks,
         track_processing_report=track_processing_report,
@@ -1494,6 +1734,7 @@ def run_video_cycle(
         "keyframes": str(out_dir / "moment_keyframes.json"),
         "moment_index_db": str(db_path),
         "phase_outputs": str(phase_outputs_path),
+        "tracked_rows": str(tracked_rows_output_path or (out_dir / "tracked_rows.json")) if detections_path else None,
         "captions": str(effective_captions_path) if effective_captions_path else None,
         "tracks_report": str(effective_tracks_report_path),
         "vocab_postprocess": str(effective_vocab_postprocess_path) if effective_vocab_postprocess_path else None,

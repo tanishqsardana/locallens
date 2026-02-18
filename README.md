@@ -151,6 +151,18 @@ PYTHONPATH=src python -m videosearch.video_cycle_cli \
   --show-phase-outputs
 ```
 
+Or run tracking in-pipeline from frame-level detections:
+
+```bash
+PYTHONPATH=src python -m videosearch.video_cycle_cli \
+  --video /path/to/video.mp4 \
+  --detections /path/to/detections.json \
+  --out-dir data/video_cycle_run \
+  --detect-track-iou-threshold 0.3 \
+  --detect-track-max-missed-frames 10 \
+  --show-phase-outputs
+```
+
 Phase 3 track processing controls:
 - `--track-min-confidence` (drop low-confidence rows)
 - `--track-min-length` (drop short tracks)
@@ -191,6 +203,7 @@ Pipeline artifacts:
 - `data/video_cycle_run/vocabulary.json` (if captions are provided)
 - `data/video_cycle_run/vlm_captions_generated.json` (if `--auto-captions` is used)
 - `data/video_cycle_run/vocab_postprocess.json` (if `--llm-postprocess-vocab` is used)
+- `data/video_cycle_run/tracked_rows.json` (if `--detections` is used)
 - `data/video_cycle_run/normalized_tracks.json`
 - `data/video_cycle_run/tracks_report.json`
 - `data/video_cycle_run/moments.json`
@@ -220,8 +233,8 @@ Each row must contain equivalents of:
 - `frame_idx` (or `frame` / `frame_id`)
 - `time_sec` (or `timestamp` / `time`)
 
-`--tracks` and `--bytetrack-txt` are mutually exclusive.
-Provide one of them.
+`--tracks`, `--bytetrack-txt`, and `--detections` are mutually exclusive.
+Provide exactly one.
 `--captions` and `--auto-captions` are mutually exclusive.
 
 ## Moment Generation (Tracking Output -> Events)

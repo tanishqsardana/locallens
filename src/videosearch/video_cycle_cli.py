@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .video_cycle import (
+    DetectionTrackingConfig,
     LLMVocabPostprocessConfig,
     TrackProcessingConfig,
     VLMCaptionConfig,
@@ -34,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video", required=True, help="Input video path")
     parser.add_argument("--tracks", default=None, help="Tracking output JSON path")
     parser.add_argument("--bytetrack-txt", default=None, help="ByteTrack MOT txt path")
+    parser.add_argument(
+        "--detections",
+        default=None,
+        help="Frame-level detections JSON path (class,bbox,confidence,frame_idx,time_sec). "
+        "If provided, tracking is run in-pipeline.",
+    )
     parser.add_argument(
         "--bytetrack-class",
         default="car",
@@ -99,6 +106,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated seed labels for prompt terms",
     )
     parser.add_argument("--target-fps", type=float, default=10.0, help="Video ingest sample FPS")
+    parser.add_argument("--detect-track-iou-threshold", type=float, default=0.3)
+    parser.add_argument("--detect-track-max-missed-frames", type=int, default=10)
+    parser.add_argument("--detect-track-min-confidence", type=float, default=0.0)
+    parser.add_argument(
+        "--detect-track-class-agnostic",
+        action="store_true",
+        help="Disable class-aware matching when tracking detections in-pipeline",
+    )
     parser.add_argument("--track-min-confidence", type=float, default=0.0)
     parser.add_argument("--track-min-length", type=int, default=1, help="Minimum detections per track to keep")
     parser.add_argument(
@@ -140,11 +155,15 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.captions and args.auto_captions:
         raise ValueError("Use either --captions or --auto-captions, not both")
+    input_count = int(bool(args.tracks)) + int(bool(args.bytetrack_txt)) + int(bool(args.detections))
+    if input_count != 1:
+        raise ValueError("Provide exactly one of --tracks, --bytetrack-txt, or --detections")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    tracks_path: str
+    tracks_path: str | None = None
+    detections_path: str | None = None
     if args.tracks:
         tracks_path = args.tracks
     elif args.bytetrack_txt:
@@ -160,8 +179,10 @@ def main() -> int:
         converted_path = inputs_dir / "converted_tracks_from_bytetrack.json"
         converted_path.write_text(json.dumps(converted, indent=2, ensure_ascii=True), encoding="utf-8")
         tracks_path = str(converted_path)
+    elif args.detections:
+        detections_path = args.detections
     else:
-        raise ValueError("Provide either --tracks or --bytetrack-txt")
+        raise ValueError("Provide exactly one input source")
 
     vlm_config = None
     if args.auto_captions:
@@ -185,6 +206,14 @@ def main() -> int:
     )
     track_config.validate()
 
+    detection_tracking_config = DetectionTrackingConfig(
+        iou_threshold=float(args.detect_track_iou_threshold),
+        max_missed_frames=int(args.detect_track_max_missed_frames),
+        min_detection_confidence=float(args.detect_track_min_confidence),
+        class_aware=not bool(args.detect_track_class_agnostic),
+    )
+    detection_tracking_config.validate()
+
     llm_vocab_config = None
     if args.llm_postprocess_vocab:
         llm_vocab_config = LLMVocabPostprocessConfig(
@@ -201,7 +230,9 @@ def main() -> int:
     summary = run_video_cycle(
         video_path=args.video,
         tracks_path=tracks_path,
+        detections_path=detections_path,
         output_dir=out_dir,
+        detection_tracking_config=detection_tracking_config if detections_path else None,
         captions_path=args.captions,
         vlm_caption_config=vlm_config,
         llm_vocab_postprocess_config=llm_vocab_config,

@@ -6,6 +6,7 @@ from .moments import Moment, MomentConfig, MomentGenerator, TrackObservation, ge
 from .pipeline import VideoSemanticSearch
 from .types import TranscriptSegment, VideoChunk, VideoTranscript
 from .video_cycle import (
+    DetectionTrackingConfig,
     LLMVocabPostprocessConfig,
     TrackProcessingConfig,
     VLMCaptionConfig,
@@ -20,11 +21,13 @@ from .video_cycle import (
     extract_chat_completion_text,
     extract_object_nouns,
     generate_vlm_captions,
+    normalize_detection_rows,
     normalize_tracking_rows,
     parse_vocab_postprocess_output,
     process_tracking_rows,
     postprocess_vocabulary_with_llm,
     run_video_cycle,
+    track_detections,
     video_fps,
 )
 
@@ -32,6 +35,7 @@ __all__ = [
     "BaseEmbedder",
     "ChunkConfig",
     "HashingEmbedder",
+    "DetectionTrackingConfig",
     "LLMVocabPostprocessConfig",
     "TrackProcessingConfig",
     "VLMCaptionConfig",
@@ -51,11 +55,13 @@ __all__ = [
     "extract_chat_completion_text",
     "extract_object_nouns",
     "generate_vlm_captions",
+    "normalize_detection_rows",
     "normalize_tracking_rows",
     "parse_vocab_postprocess_output",
     "process_tracking_rows",
     "postprocess_vocabulary_with_llm",
     "run_video_cycle",
+    "track_detections",
     "video_fps",
     "TranscriptSegment",
     "VideoChunk",
