@@ -1,0 +1,37 @@
+{
+  "video_id": "spt-001",
+  "title": "Football Pressing Patterns",
+  "domain": "sports",
+  "url": "https://example.com/videos/spt-001",
+  "metadata": {
+    "speaker": "Tactical Coach",
+    "language": "en"
+  },
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 12.1,
+      "text": "High pressing starts with coordinated triggers when the opposing center-back receives on their weak foot."
+    },
+    {
+      "start": 12.2,
+      "end": 24.0,
+      "text": "The front line cuts central passing lanes while midfielders lock onto nearby support options."
+    },
+    {
+      "start": 24.1,
+      "end": 36.4,
+      "text": "Counter-pressing in the first five seconds after losing possession can recover the ball in advanced zones."
+    },
+    {
+      "start": 36.5,
+      "end": 48.9,
+      "text": "If pressure is beaten, the defensive block should reset quickly to prevent transition chances."
+    },
+    {
+      "start": 49.0,
+      "end": 61.8,
+      "text": "Video analysis helps players understand spacing, timing, and angles required for effective pressing."
+    }
+  ]
+}

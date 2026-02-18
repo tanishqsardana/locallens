@@ -1,0 +1,19 @@
+{
+  "default": {
+    "max_words": 140,
+    "stride_words": 80,
+    "min_words": 30
+  },
+  "domains": {
+    "finance": {
+      "max_words": 110,
+      "stride_words": 70,
+      "min_words": 25
+    },
+    "medical": {
+      "max_words": 90,
+      "stride_words": 55,
+      "min_words": 25
+    }
+  }
+}

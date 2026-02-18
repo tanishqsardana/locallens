@@ -1,0 +1,37 @@
+{
+  "video_id": "med-001",
+  "title": "Practical Glucose Management",
+  "domain": "medical",
+  "url": "https://example.com/videos/med-001",
+  "metadata": {
+    "speaker": "Clinical Educator",
+    "language": "en"
+  },
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 12.6,
+      "text": "For people with type 2 diabetes, consistent glucose monitoring helps evaluate treatment effectiveness."
+    },
+    {
+      "start": 12.7,
+      "end": 24.8,
+      "text": "Nutrition strategy should prioritize fiber, reduced refined carbohydrates, and stable meal timing."
+    },
+    {
+      "start": 24.9,
+      "end": 37.4,
+      "text": "Aerobic exercise improves insulin sensitivity, while resistance training supports metabolic health."
+    },
+    {
+      "start": 37.5,
+      "end": 50.9,
+      "text": "Medication adherence and periodic A1C tests are central components of long-term diabetes care."
+    },
+    {
+      "start": 51.0,
+      "end": 63.1,
+      "text": "Clinicians should review symptoms of hypoglycemia and instruct when to adjust doses safely."
+    }
+  ]
+}

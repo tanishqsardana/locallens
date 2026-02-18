@@ -1,0 +1,42 @@
+{
+  "video_id": "fin-001",
+  "title": "Portfolio Basics for Volatile Markets",
+  "domain": "finance",
+  "url": "https://example.com/videos/fin-001",
+  "metadata": {
+    "speaker": "Analyst Team",
+    "language": "en"
+  },
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 11.2,
+      "text": "In volatile markets, diversification is your first defense against concentrated downside risk."
+    },
+    {
+      "start": 11.3,
+      "end": 23.5,
+      "text": "A balanced portfolio across equities, fixed income, and cash can reduce drawdown during sharp selloffs."
+    },
+    {
+      "start": 23.6,
+      "end": 35.0,
+      "text": "Rebalancing monthly or quarterly keeps position sizes aligned with your target asset allocation."
+    },
+    {
+      "start": 35.1,
+      "end": 49.7,
+      "text": "Risk tolerance should be estimated before selecting sector exposure, leverage, or small-cap holdings."
+    },
+    {
+      "start": 49.8,
+      "end": 66.4,
+      "text": "Investors often overreact to short-term price swings, which can lead to emotional and costly decisions."
+    },
+    {
+      "start": 66.5,
+      "end": 81.9,
+      "text": "Use a written plan for entry, stop-loss limits, and long-term compounding goals to maintain discipline."
+    }
+  ]
+}
