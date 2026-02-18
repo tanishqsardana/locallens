@@ -10,6 +10,7 @@ from .moment_query import (
     pass_through_tracks,
     when_object_appears,
 )
+from .moment_overlay import OverlayConfig, active_moments_at_time, render_moment_overlay_video
 from .pipeline import VideoSemanticSearch
 from .types import TranscriptSegment, VideoChunk, VideoTranscript
 from .video_cycle import (
@@ -58,6 +59,7 @@ __all__ = [
     "MomentConfig",
     "MomentGenerator",
     "PassThroughConfig",
+    "OverlayConfig",
     "SentenceTransformerEmbedder",
     "TrackObservation",
     "build_keyframe_targets",
@@ -67,6 +69,7 @@ __all__ = [
     "build_prompt_terms",
     "canonicalize_label",
     "cosine_search_moments",
+    "active_moments_at_time",
     "frames_with_label",
     "extract_chat_completion_text",
     "extract_object_nouns",
@@ -80,6 +83,7 @@ __all__ = [
     "process_tracking_rows",
     "postprocess_vocabulary_with_llm",
     "pass_through_tracks",
+    "render_moment_overlay_video",
     "run_video_cycle",
     "answer_nlq",
     "when_object_appears",

@@ -355,3 +355,19 @@ PYTHONPATH=src python -m videosearch.moment_query_cli nlq \
   --frame-width 3840 \
   --frame-height 2160
 ```
+
+## Moment Overlay Video (Verification UI)
+
+Render an MP4 overlay to visually verify moments against tracks:
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_overlay_cli \
+  --video /path/to/video.mp4 \
+  --run-dir data/video_cycle_run \
+  --out-video data/video_cycle_run/moment_overlay.mp4 \
+  --log-every-frames 60
+```
+
+Useful flags:
+- `--show-all-tracks` (draw every track, not only active moment entities)
+- `--start-sec` / `--end-sec` (render only a time slice)
