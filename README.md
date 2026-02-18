@@ -179,6 +179,7 @@ PYTHONPATH=src python -m videosearch.video_cycle_cli \
   --llm-postprocess-vocab \
   --detect-track-iou-threshold 0.3 \
   --detect-track-max-missed-frames 10 \
+  --log-progress \
   --show-phase-outputs
 ```
 

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import sqlite3
+import sys
 from typing import Any, Iterable, Mapping, Sequence
 from urllib import error as url_error
 from urllib import request as url_request
@@ -202,6 +203,12 @@ def _ensure_cv2() -> Any:
             "Install with: pip install -e '.[video]'"
         ) from exc
     return cv2
+
+
+def _log_progress(enabled: bool, message: str) -> None:
+    if not enabled:
+        return
+    print(f"[video_cycle] {message}", file=sys.stderr, flush=True)
 
 
 def ingest_video(
@@ -555,6 +562,8 @@ def _call_vlm_caption(config: VLMCaptionConfig, image_path: str | Path) -> tuple
 def generate_vlm_captions(
     sampled_rows: Sequence[Mapping[str, Any]],
     config: VLMCaptionConfig,
+    *,
+    log_progress: bool = False,
 ) -> list[dict[str, Any]]:
     """
     Caption sampled frames through an OpenAI-compatible VLM endpoint.
@@ -562,10 +571,20 @@ def generate_vlm_captions(
     config.validate()
     out: list[dict[str, Any]] = []
     stride = max(1, int(config.frame_stride))
+    total_frames = len(sampled_rows)
+    scheduled = (total_frames + stride - 1) // stride
+    _log_progress(
+        log_progress,
+        f"Phase 2 VLM captions start: {scheduled} requests (sampled_frames={total_frames}, stride={stride})",
+    )
+    sent = 0
 
     for idx, row in enumerate(sampled_rows):
         if idx % stride != 0:
             continue
+        sent += 1
+        if sent == 1 or sent % 10 == 0 or sent == scheduled:
+            _log_progress(log_progress, f"VLM progress: {sent}/{scheduled}")
         frame_idx = int(row.get("frame_idx", 0))
         time_sec = float(row.get("time_sec", 0.0))
         image_path = row.get("image_path")
@@ -584,6 +603,7 @@ def generate_vlm_captions(
         except Exception as exc:
             entry["error"] = str(exc)
         out.append(entry)
+    _log_progress(log_progress, f"Phase 2 VLM captions done: {len(out)} rows")
     return out
 
 
@@ -795,6 +815,7 @@ def generate_groundingdino_detections(
     *,
     prompt_terms: Sequence[str],
     config: GroundingDINOConfig,
+    log_progress: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Run GroundingDINO on sampled frames to produce frame-level detections.
@@ -812,6 +833,14 @@ def generate_groundingdino_detections(
     model = load_model(config.model_config_path, config.model_weights_path)
 
     stride = max(1, int(config.frame_stride))
+    scheduled = (len(sampled_rows) + stride - 1) // stride
+    if config.max_frames > 0:
+        scheduled = min(scheduled, config.max_frames)
+    _log_progress(
+        log_progress,
+        f"Phase 3 detection start (GroundingDINO): frames={scheduled}, device={config.device}, "
+        f"box_thr={config.box_threshold}, text_thr={config.text_threshold}",
+    )
     detections: list[dict[str, Any]] = []
     frames_attempted = 0
     frames_processed = 0
@@ -824,6 +853,8 @@ def generate_groundingdino_detections(
         if config.max_frames > 0 and frames_attempted >= config.max_frames:
             break
         frames_attempted += 1
+        if frames_attempted == 1 or frames_attempted % 25 == 0 or frames_attempted == scheduled:
+            _log_progress(log_progress, f"GroundingDINO progress: frame {frames_attempted}/{scheduled}")
 
         image_path = row.get("image_path")
         if not isinstance(image_path, str) or not image_path:
@@ -882,6 +913,11 @@ def generate_groundingdino_detections(
         "first_error": first_error,
         "config": asdict(config),
     }
+    _log_progress(
+        log_progress,
+        f"Phase 3 detection done (GroundingDINO): detections={len(detections)}, "
+        f"processed={frames_processed}, failed={frames_failed}",
+    )
     return detections, report
 
 
@@ -890,6 +926,7 @@ def generate_yoloworld_detections(
     *,
     prompt_terms: Sequence[str],
     config: YOLOWorldConfig,
+    log_progress: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """
     Run YOLO-World on sampled frames to produce frame-level detections.
@@ -911,6 +948,14 @@ def generate_yoloworld_detections(
     model.set_classes(clean_terms)
 
     stride = max(1, int(config.frame_stride))
+    scheduled = (len(sampled_rows) + stride - 1) // stride
+    if config.max_frames > 0:
+        scheduled = min(scheduled, config.max_frames)
+    _log_progress(
+        log_progress,
+        f"Phase 3 detection start (YOLO-World): frames={scheduled}, device={config.device}, "
+        f"model={config.model}, conf={config.confidence}",
+    )
     detections: list[dict[str, Any]] = []
     frames_attempted = 0
     frames_processed = 0
@@ -923,6 +968,8 @@ def generate_yoloworld_detections(
         if config.max_frames > 0 and frames_attempted >= config.max_frames:
             break
         frames_attempted += 1
+        if frames_attempted == 1 or frames_attempted % 25 == 0 or frames_attempted == scheduled:
+            _log_progress(log_progress, f"YOLO-World progress: frame {frames_attempted}/{scheduled}")
 
         image_path = row.get("image_path")
         if not isinstance(image_path, str) or not image_path:
@@ -992,6 +1039,11 @@ def generate_yoloworld_detections(
         "first_error": first_error,
         "config": asdict(config),
     }
+    _log_progress(
+        log_progress,
+        f"Phase 3 detection done (YOLO-World): detections={len(detections)}, "
+        f"processed={frames_processed}, failed={frames_failed}",
+    )
     return detections, report
 
 
@@ -1763,6 +1815,7 @@ def run_video_cycle(
     captions_output_path: str | Path | None = None,
     llm_vocab_postprocess_config: LLMVocabPostprocessConfig | None = None,
     vocab_postprocess_output_path: str | Path | None = None,
+    log_progress: bool = False,
     include_full_phase_outputs: bool = False,
     phase_preview_limit: int = 25,
 ) -> dict[str, Any]:
@@ -1775,10 +1828,15 @@ def run_video_cycle(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     phase_preview_limit = _clamp_preview_limit(phase_preview_limit)
+    _log_progress(log_progress, "Phase 1 ingest start")
 
     manifest = ingest_video(video_path=video_path, output_dir=out_dir / "ingest", target_fps=target_fps)
     sampled_rows = json.loads(Path(manifest.sampled_frames_path).read_text(encoding="utf-8"))
     synonym_map = load_synonym_map(synonyms_path)
+    _log_progress(
+        log_progress,
+        f"Phase 1 ingest done: sampled_frames={len(sampled_rows)}, fps={manifest.fps:.2f}, duration={manifest.duration_sec:.2f}s",
+    )
 
     prompts: list[str] = []
     discovered: list[str] = []
@@ -1793,7 +1851,11 @@ def run_video_cycle(
         captions = load_captions(captions_path)
         phase2_status = "provided_captions"
     elif vlm_caption_config:
-        caption_rows = generate_vlm_captions(sampled_rows=sampled_rows, config=vlm_caption_config)
+        caption_rows = generate_vlm_captions(
+            sampled_rows=sampled_rows,
+            config=vlm_caption_config,
+            log_progress=log_progress,
+        )
         effective_captions_path = captions_output_path or (out_dir / "vlm_captions_generated.json")
         effective_captions_file = Path(effective_captions_path)
         effective_captions_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1823,6 +1885,7 @@ def run_video_cycle(
         llm_vocab_postprocess = {"status": "skipped_no_captions"}
 
     if captions:
+        _log_progress(log_progress, f"Phase 2 vocabulary start: captions={len(captions)}")
         discovered = extract_object_nouns(captions, min_count=1, top_k=128)
         prompts = build_prompt_terms(seed_labels or [], discovered, synonym_map)
 
@@ -1870,6 +1933,7 @@ def run_video_cycle(
             ),
             encoding="utf-8",
         )
+        _log_progress(log_progress, f"Phase 2 vocabulary done: prompt_terms={len(prompts)}")
 
     input_count = (
         int(bool(tracks_path))
@@ -1898,6 +1962,7 @@ def run_video_cycle(
             sampled_rows=sampled_rows,
             prompt_terms=generation_terms,
             config=groundingdino_config,
+            log_progress=log_progress,
         )
         effective_detections_path = detections_output_path or (out_dir / "groundingdino_detections_generated.json")
         detections_file = Path(effective_detections_path)
@@ -1917,6 +1982,10 @@ def run_video_cycle(
             config=effective_tracking_config,
             fps=manifest.fps,
         )
+        _log_progress(
+            log_progress,
+            f"Phase 3 tracking done: tracked_rows={len(tracked_rows)} (source={track_source})",
+        )
         effective_tracked_path = tracked_rows_output_path or (out_dir / "tracked_rows.json")
         tracked_rows_file = Path(effective_tracked_path)
         tracked_rows_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1934,6 +2003,7 @@ def run_video_cycle(
             sampled_rows=sampled_rows,
             prompt_terms=generation_terms,
             config=yoloworld_config,
+            log_progress=log_progress,
         )
         effective_detections_path = detections_output_path or (out_dir / "yoloworld_detections_generated.json")
         detections_file = Path(effective_detections_path)
@@ -1952,6 +2022,10 @@ def run_video_cycle(
             normalized_detections,
             config=effective_tracking_config,
             fps=manifest.fps,
+        )
+        _log_progress(
+            log_progress,
+            f"Phase 3 tracking done: tracked_rows={len(tracked_rows)} (source={track_source})",
         )
         effective_tracked_path = tracked_rows_output_path or (out_dir / "tracked_rows.json")
         tracked_rows_file = Path(effective_tracked_path)
@@ -1975,6 +2049,10 @@ def run_video_cycle(
             config=effective_tracking_config,
             fps=manifest.fps,
         )
+        _log_progress(
+            log_progress,
+            f"Phase 3 tracking done: tracked_rows={len(tracked_rows)} (source={track_source})",
+        )
         effective_tracked_path = tracked_rows_output_path or (out_dir / "tracked_rows.json")
         tracked_rows_file = Path(effective_tracked_path)
         tracked_rows_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1986,6 +2064,7 @@ def run_video_cycle(
     else:
         rows = load_json_rows(tracks_path)
         tracked_rows = rows
+        _log_progress(log_progress, f"Phase 3 input tracks loaded: rows={len(rows)}")
 
     canonicalized_tracks = normalize_tracking_rows(
         rows,
@@ -2000,6 +2079,7 @@ def run_video_cycle(
         frame_height=manifest.height,
         fps=manifest.fps,
     )
+    _log_progress(log_progress, f"Phase 3 normalize/process done: rows={len(normalized)}")
 
     normalized_path = out_dir / "normalized_tracks.json"
     normalized_path.write_text(json.dumps(normalized, indent=2, ensure_ascii=True), encoding="utf-8")
@@ -2018,6 +2098,7 @@ def run_video_cycle(
         frame_height=manifest.height,
         config=moment_config,
     )
+    _log_progress(log_progress, f"Phase 4 moments done: count={len(moments)}")
     moment_rows = moments_to_dicts(moments, video_id=manifest.video_id)
     moments_path = out_dir / "moments.json"
     moments_path.write_text(json.dumps(moment_rows, indent=2, ensure_ascii=True), encoding="utf-8")
@@ -2031,6 +2112,7 @@ def run_video_cycle(
     )
 
     embeddings, model_name = build_moment_embeddings(keyframes)
+    _log_progress(log_progress, f"Phase 5/6 keyframes+embeddings done: keyframes={len(keyframes)}, embeddings={len(embeddings)}")
     db_path = out_dir / "moment_index.sqlite"
     persist_moment_index(
         output_db=db_path,
@@ -2039,6 +2121,7 @@ def run_video_cycle(
         embeddings=embeddings,
         model_name=model_name,
     )
+    _log_progress(log_progress, "Phase 7 index done")
 
     phase_outputs = build_phase_outputs(
         manifest=manifest,
@@ -2109,6 +2192,7 @@ def run_video_cycle(
         json.dumps(summary, indent=2, ensure_ascii=True),
         encoding="utf-8",
     )
+    _log_progress(log_progress, "Video cycle complete")
     return summary
 
 

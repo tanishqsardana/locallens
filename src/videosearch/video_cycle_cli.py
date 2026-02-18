@@ -173,6 +173,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=25,
         help="Rows per phase to keep when not using --show-full-phase-outputs",
     )
+    parser.add_argument(
+        "--log-progress",
+        action="store_true",
+        help="Print phase progress logs to stderr during long-running steps",
+    )
     return parser
 
 
@@ -303,6 +308,7 @@ def main() -> int:
         captions_path=args.captions,
         vlm_caption_config=vlm_config,
         llm_vocab_postprocess_config=llm_vocab_config,
+        log_progress=bool(args.log_progress),
         synonyms_path=args.synonyms,
         seed_labels=_parse_seed_labels(args.seed_labels),
         target_fps=args.target_fps,
