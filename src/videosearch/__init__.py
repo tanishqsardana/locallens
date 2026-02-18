@@ -5,16 +5,40 @@ from .embedders import BaseEmbedder, HashingEmbedder, SentenceTransformerEmbedde
 from .moments import Moment, MomentConfig, MomentGenerator, TrackObservation, generate_moments
 from .pipeline import VideoSemanticSearch
 from .types import TranscriptSegment, VideoChunk, VideoTranscript
+from .video_cycle import (
+    VideoManifest,
+    build_keyframe_targets,
+    convert_bytetrack_mot_file,
+    convert_bytetrack_mot_rows,
+    build_prompt_terms,
+    canonicalize_label,
+    cosine_search_moments,
+    extract_object_nouns,
+    normalize_tracking_rows,
+    run_video_cycle,
+    video_fps,
+)
 
 __all__ = [
     "BaseEmbedder",
     "ChunkConfig",
     "HashingEmbedder",
+    "VideoManifest",
     "Moment",
     "MomentConfig",
     "MomentGenerator",
     "SentenceTransformerEmbedder",
     "TrackObservation",
+    "build_keyframe_targets",
+    "convert_bytetrack_mot_file",
+    "convert_bytetrack_mot_rows",
+    "build_prompt_terms",
+    "canonicalize_label",
+    "cosine_search_moments",
+    "extract_object_nouns",
+    "normalize_tracking_rows",
+    "run_video_cycle",
+    "video_fps",
     "TranscriptSegment",
     "VideoChunk",
     "VideoSemanticSearch",

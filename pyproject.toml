@@ -19,6 +19,9 @@ semantic = [
 app = [
   "streamlit>=1.39"
 ]
+video = [
+  "opencv-python-headless>=4.9"
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

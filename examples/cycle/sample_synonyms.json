@@ -1,0 +1,7 @@
+{
+  "automobile": "car",
+  "cars": "car",
+  "pedestrian": "person",
+  "walker": "person",
+  "pickup": "truck"
+}

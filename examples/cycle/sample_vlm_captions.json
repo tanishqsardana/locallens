@@ -1,0 +1,7 @@
+{
+  "captions": [
+    {"time_sec": 0.0, "caption": "A car enters the intersection while a truck waits in the lane."},
+    {"time_sec": 1.0, "caption": "A person walks close to the car near the crosswalk."},
+    {"time_sec": 2.0, "caption": "The truck starts moving and the person steps back."}
+  ]
+}

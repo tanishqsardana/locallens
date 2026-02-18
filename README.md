@@ -125,6 +125,74 @@ The app supports:
 - Interactive threshold tuning for APPEAR/DISAPPEAR/STOP/NEAR/APPROACH
 - Exporting generated moments as JSON
 
+## Full Video Cycle (Video -> Moments -> Keyframes -> Index)
+
+Install video dependencies:
+
+```bash
+python -m pip install -e ".[video]"
+```
+
+Run the full cycle:
+
+```bash
+PYTHONPATH=src python -m videosearch.video_cycle_cli \
+  --video /path/to/video.mp4 \
+  --tracks /path/to/tracks.json \
+  --out-dir data/video_cycle_run \
+  --captions /path/to/vlm_captions.json \
+  --synonyms /path/to/synonyms.json \
+  --seed-labels car,truck,person \
+  --target-fps 10 \
+  --show-phase-outputs
+```
+
+If you already ran ByteTrack and have MOT txt output:
+
+```bash
+PYTHONPATH=src python -m videosearch.video_cycle_cli \
+  --video /path/to/video.mp4 \
+  --bytetrack-txt /path/to/bytetrack_results.txt \
+  --bytetrack-class car \
+  --out-dir data/video_cycle_run \
+  --show-phase-outputs
+```
+
+Pipeline artifacts:
+- `data/video_cycle_run/ingest/video_manifest.json`
+- `data/video_cycle_run/ingest/sampled_frames.json`
+- `data/video_cycle_run/vocabulary.json` (if captions are provided)
+- `data/video_cycle_run/normalized_tracks.json`
+- `data/video_cycle_run/moments.json`
+- `data/video_cycle_run/moment_keyframes.json`
+- `data/video_cycle_run/moment_index.sqlite`
+- `data/video_cycle_run/phase_outputs.json` (phase-by-phase debug payload)
+
+For full untruncated phase payloads during development:
+
+```bash
+PYTHONPATH=src python -m videosearch.video_cycle_cli \
+  --video /path/to/video.mp4 \
+  --tracks /path/to/tracks.json \
+  --out-dir data/video_cycle_run \
+  --show-full-phase-outputs
+```
+
+Track JSON input can be either:
+- list of rows, or
+- object with `observations` list.
+
+Each row must contain equivalents of:
+- `track_id` (or `id`)
+- `class` (or `label` / `class_name` / `cls`)
+- `bbox` `[x1,y1,x2,y2]` (or `xyxy`)
+- `confidence` (or `score` / `conf`)
+- `frame_idx` (or `frame` / `frame_id`)
+- `time_sec` (or `timestamp` / `time`)
+
+`--tracks` and `--bytetrack-txt` are mutually exclusive.
+Provide one of them.
+
 ## Moment Generation (Tracking Output -> Events)
 
 `src/videosearch/moments.py` builds structured moments from tracking outputs only
