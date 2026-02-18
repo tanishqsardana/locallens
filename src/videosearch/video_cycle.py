@@ -90,6 +90,30 @@ class VLMCaptionConfig:
             raise ValueError("timeout_sec must be > 0")
 
 
+@dataclass(slots=True)
+class LLMVocabPostprocessConfig:
+    endpoint: str = "http://localhost:8000/v1/chat/completions"
+    model: str = "Qwen/Qwen2.5-VL-7B-Instruct"
+    max_tokens: int = 500
+    timeout_sec: float = 60.0
+    temperature: float = 0.0
+    api_key: str | None = None
+    max_detection_terms: int = 20
+    prompt_template: str | None = None
+
+    def validate(self) -> None:
+        if not self.endpoint.strip():
+            raise ValueError("LLM endpoint cannot be empty")
+        if not self.model.strip():
+            raise ValueError("LLM model cannot be empty")
+        if self.max_tokens <= 0:
+            raise ValueError("max_tokens must be > 0")
+        if self.timeout_sec <= 0:
+            raise ValueError("timeout_sec must be > 0")
+        if self.max_detection_terms <= 0:
+            raise ValueError("max_detection_terms must be > 0")
+
+
 def _ensure_cv2() -> Any:
     try:
         import cv2  # type: ignore
@@ -362,6 +386,67 @@ def extract_chat_completion_text(response_payload: Mapping[str, Any]) -> str:
     return ""
 
 
+def _post_chat_completion(
+    *,
+    endpoint: str,
+    payload: Mapping[str, Any],
+    timeout_sec: float,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    request = url_request.Request(
+        endpoint,
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with url_request.urlopen(request, timeout=float(timeout_sec)) as response:
+            raw = response.read().decode("utf-8")
+    except url_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"LLM request failed with HTTP {exc.code}: {detail[:300]}"
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(f"LLM request failed: {exc}") from exc
+    return json.loads(raw)
+
+
+def _extract_json_object_from_text(text: str) -> dict[str, Any]:
+    direct = text.strip()
+    if direct:
+        try:
+            parsed = json.loads(direct)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        try:
+            parsed = json.loads(fenced.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        candidate = text[start : end + 1]
+        parsed = json.loads(candidate)
+        if isinstance(parsed, dict):
+            return parsed
+
+    raise ValueError("Could not parse JSON object from model output")
+
+
 def _call_vlm_caption(config: VLMCaptionConfig, image_path: str | Path) -> tuple[str, dict[str, Any]]:
     image_data_url = _image_to_data_url(image_path)
     payload = {
@@ -378,29 +463,12 @@ def _call_vlm_caption(config: VLMCaptionConfig, image_path: str | Path) -> tuple
         "max_tokens": int(config.max_tokens),
         "temperature": float(config.temperature),
     }
-    body = json.dumps(payload).encode("utf-8")
-    headers = {"Content-Type": "application/json"}
-    if config.api_key:
-        headers["Authorization"] = f"Bearer {config.api_key}"
-
-    request = url_request.Request(
-        config.endpoint,
-        data=body,
-        headers=headers,
-        method="POST",
+    parsed = _post_chat_completion(
+        endpoint=config.endpoint,
+        payload=payload,
+        timeout_sec=config.timeout_sec,
+        api_key=config.api_key,
     )
-    try:
-        with url_request.urlopen(request, timeout=float(config.timeout_sec)) as response:
-            raw = response.read().decode("utf-8")
-    except url_error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"VLM request failed with HTTP {exc.code}: {detail[:300]}"
-        ) from exc
-    except Exception as exc:
-        raise RuntimeError(f"VLM request failed: {exc}") from exc
-
-    parsed = json.loads(raw)
     text = extract_chat_completion_text(parsed)
     return text, parsed
 
@@ -481,6 +549,138 @@ def build_prompt_terms(
         seen.add(clean)
         out.append(clean)
     return out
+
+
+def _normalize_term_list(values: Any, *, max_items: int = 256) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip().lower()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        out.append(cleaned)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _normalize_canonical_map(values: Any) -> dict[str, str]:
+    if not isinstance(values, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in values.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        src = key.strip().lower()
+        dst = value.strip().lower()
+        if not src or not dst:
+            continue
+        out[src] = dst
+    return out
+
+
+def build_vocab_postprocess_prompt(
+    *,
+    seed_labels: Sequence[str],
+    discovered_labels: Sequence[str],
+    prompt_terms: Sequence[str],
+    max_detection_terms: int,
+) -> str:
+    seed = ", ".join(seed_labels) if seed_labels else "(none)"
+    discovered = ", ".join(discovered_labels) if discovered_labels else "(none)"
+    current = ", ".join(prompt_terms) if prompt_terms else "(none)"
+    return (
+        "Clean this vocabulary for open-vocab traffic detection.\n"
+        f"Seed labels: {seed}\n"
+        f"Discovered labels: {discovered}\n"
+        f"Current prompt terms: {current}\n"
+        "Rules: keep only concrete visual objects and infrastructure terms; "
+        "remove adjectives, verbs, locations, weather words, and generic words.\n"
+        "Return strict JSON only in this schema:\n"
+        "{\"detection_terms\":[],\"scene_terms\":[],\"dropped_terms\":[],\"canonical_map\":{}}\n"
+        f"Limit detection_terms to at most {int(max_detection_terms)}."
+    )
+
+
+def parse_vocab_postprocess_output(text: str, *, max_detection_terms: int = 20) -> dict[str, Any]:
+    parsed = _extract_json_object_from_text(text)
+    detection_terms = _normalize_term_list(parsed.get("detection_terms"), max_items=max_detection_terms)
+    scene_terms = _normalize_term_list(parsed.get("scene_terms"))
+    dropped_terms = _normalize_term_list(parsed.get("dropped_terms"))
+    canonical_map = _normalize_canonical_map(parsed.get("canonical_map"))
+    return {
+        "detection_terms": detection_terms,
+        "scene_terms": scene_terms,
+        "dropped_terms": dropped_terms,
+        "canonical_map": canonical_map,
+    }
+
+
+def postprocess_vocabulary_with_llm(
+    *,
+    seed_labels: Sequence[str],
+    discovered_labels: Sequence[str],
+    prompt_terms: Sequence[str],
+    config: LLMVocabPostprocessConfig,
+) -> dict[str, Any]:
+    config.validate()
+    prompt = config.prompt_template or build_vocab_postprocess_prompt(
+        seed_labels=seed_labels,
+        discovered_labels=discovered_labels,
+        prompt_terms=prompt_terms,
+        max_detection_terms=config.max_detection_terms,
+    )
+
+    payload = {
+        "model": config.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": float(config.temperature),
+        "max_tokens": int(config.max_tokens),
+    }
+    response = _post_chat_completion(
+        endpoint=config.endpoint,
+        payload=payload,
+        timeout_sec=config.timeout_sec,
+        api_key=config.api_key,
+    )
+    text = extract_chat_completion_text(response)
+    normalized = parse_vocab_postprocess_output(
+        text,
+        max_detection_terms=config.max_detection_terms,
+    )
+    detection_terms = normalized["detection_terms"]
+    scene_terms = normalized["scene_terms"]
+    dropped_terms = normalized["dropped_terms"]
+    canonical_map = normalized["canonical_map"]
+
+    # Always preserve seed labels unless explicitly remapped.
+    for seed in seed_labels:
+        clean = seed.strip().lower()
+        if not clean:
+            continue
+        canonical = canonical_map.get(clean, clean)
+        if canonical not in detection_terms:
+            detection_terms.append(canonical)
+        if len(detection_terms) >= config.max_detection_terms:
+            break
+
+    detection_terms = detection_terms[: config.max_detection_terms]
+    return {
+        "status": "applied",
+        "model": config.model,
+        "endpoint": config.endpoint,
+        "prompt": prompt,
+        "detection_terms": detection_terms,
+        "scene_terms": scene_terms,
+        "dropped_terms": dropped_terms,
+        "canonical_map": canonical_map,
+        "raw_response_text": text,
+    }
 
 
 def normalize_tracking_rows(
@@ -815,6 +1015,7 @@ def build_phase_outputs(
     discovered_labels: Sequence[str],
     prompt_terms: Sequence[str],
     phase2_status: str,
+    llm_vocab_postprocess: Mapping[str, Any] | None = None,
     include_full: bool = False,
     preview_limit: int = 25,
 ) -> dict[str, Any]:
@@ -849,6 +1050,7 @@ def build_phase_outputs(
             "synonym_map": dict(synonym_map),
             "discovered_labels": list(discovered_labels),
             "prompt_terms": list(prompt_terms),
+            "llm_postprocess": dict(llm_vocab_postprocess or {}),
         },
         "phase_3_normalized_tracks": {
             "raw_track_row_count": len(raw_tracks),
@@ -906,6 +1108,8 @@ def run_video_cycle(
     moment_overrides: Mapping[str, Any] | None = None,
     vlm_caption_config: VLMCaptionConfig | None = None,
     captions_output_path: str | Path | None = None,
+    llm_vocab_postprocess_config: LLMVocabPostprocessConfig | None = None,
+    vocab_postprocess_output_path: str | Path | None = None,
     include_full_phase_outputs: bool = False,
     phase_preview_limit: int = 25,
 ) -> dict[str, Any]:
@@ -927,7 +1131,9 @@ def run_video_cycle(
     caption_rows: list[dict[str, Any]] = []
     captions: list[str] = []
     phase2_status = "skipped_no_captions"
+    llm_vocab_postprocess: dict[str, Any] = {"status": "skipped_not_requested"}
     effective_captions_path: str | Path | None = captions_path
+    effective_vocab_postprocess_path: str | Path | None = None
 
     if captions_path:
         captions = load_captions(captions_path)
@@ -959,15 +1165,51 @@ def run_video_cycle(
         captions = [row["caption"] for row in caption_rows if isinstance(row.get("caption"), str) and row["caption"].strip()]
         phase2_status = "generated_vlm_captions"
 
+    if llm_vocab_postprocess_config and not captions:
+        llm_vocab_postprocess = {"status": "skipped_no_captions"}
+
     if captions:
         discovered = extract_object_nouns(captions, min_count=1, top_k=128)
         prompts = build_prompt_terms(seed_labels or [], discovered, synonym_map)
+
+        if llm_vocab_postprocess_config:
+            try:
+                llm_vocab_postprocess = postprocess_vocabulary_with_llm(
+                    seed_labels=seed_labels or [],
+                    discovered_labels=discovered,
+                    prompt_terms=prompts,
+                    config=llm_vocab_postprocess_config,
+                )
+                post_terms = _normalize_term_list(
+                    llm_vocab_postprocess.get("detection_terms"),
+                    max_items=llm_vocab_postprocess_config.max_detection_terms,
+                )
+                if post_terms:
+                    prompts = post_terms
+                    phase2_status = f"{phase2_status}_with_llm_postprocess"
+                else:
+                    llm_vocab_postprocess["status"] = "failed_empty_detection_terms"
+            except Exception as exc:
+                llm_vocab_postprocess = {
+                    "status": "failed",
+                    "error": str(exc),
+                }
+
+            effective_vocab_postprocess_path = vocab_postprocess_output_path or (out_dir / "vocab_postprocess.json")
+            post_file = Path(effective_vocab_postprocess_path)
+            post_file.parent.mkdir(parents=True, exist_ok=True)
+            post_file.write_text(
+                json.dumps(llm_vocab_postprocess, indent=2, ensure_ascii=True),
+                encoding="utf-8",
+            )
+
         (out_dir / "vocabulary.json").write_text(
             json.dumps(
                 {
                     "seed_labels": list(seed_labels or []),
                     "discovered_labels": discovered,
                     "prompt_terms": prompts,
+                    "llm_postprocess": llm_vocab_postprocess,
                 },
                 indent=2,
                 ensure_ascii=True,
@@ -1027,6 +1269,7 @@ def run_video_cycle(
         discovered_labels=discovered,
         prompt_terms=prompts,
         phase2_status=phase2_status,
+        llm_vocab_postprocess=llm_vocab_postprocess,
         include_full=include_full_phase_outputs,
         preview_limit=phase_preview_limit,
     )
@@ -1044,6 +1287,7 @@ def run_video_cycle(
         "moment_index_db": str(db_path),
         "phase_outputs": str(phase_outputs_path),
         "captions": str(effective_captions_path) if effective_captions_path else None,
+        "vocab_postprocess": str(effective_vocab_postprocess_path) if effective_vocab_postprocess_path else None,
         "counts": {
             "tracks": len(normalized),
             "moments": len(moment_rows),

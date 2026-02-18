@@ -163,6 +163,8 @@ PYTHONPATH=src python -m videosearch.video_cycle_cli \
   --vlm-model Qwen/Qwen2.5-VL-7B-Instruct \
   --vlm-frame-stride 10 \
   --vlm-max-tokens 120 \
+  --llm-postprocess-vocab \
+  --llm-postprocess-max-detection-terms 20 \
   --show-phase-outputs
 ```
 
@@ -182,6 +184,7 @@ Pipeline artifacts:
 - `data/video_cycle_run/ingest/sampled_frames.json`
 - `data/video_cycle_run/vocabulary.json` (if captions are provided)
 - `data/video_cycle_run/vlm_captions_generated.json` (if `--auto-captions` is used)
+- `data/video_cycle_run/vocab_postprocess.json` (if `--llm-postprocess-vocab` is used)
 - `data/video_cycle_run/normalized_tracks.json`
 - `data/video_cycle_run/moments.json`
 - `data/video_cycle_run/moment_keyframes.json`

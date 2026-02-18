@@ -9,10 +9,12 @@ from videosearch.video_cycle import (
     build_phase_outputs,
     build_keyframe_targets,
     build_prompt_terms,
+    build_vocab_postprocess_prompt,
     convert_bytetrack_mot_rows,
     extract_chat_completion_text,
     extract_object_nouns,
     normalize_tracking_rows,
+    parse_vocab_postprocess_output,
 )
 
 
@@ -36,6 +38,17 @@ class VideoCycleHelpersTest(unittest.TestCase):
         self.assertIn("car", terms)
         self.assertIn("person", terms)
         self.assertIn("pickup truck", terms)
+
+    def test_build_vocab_postprocess_prompt(self) -> None:
+        prompt = build_vocab_postprocess_prompt(
+            seed_labels=["car", "truck", "person"],
+            discovered_labels=["car", "cloudy", "lane", "billboard"],
+            prompt_terms=["car", "cloudy", "lane"],
+            max_detection_terms=12,
+        )
+        self.assertIn("Seed labels", prompt)
+        self.assertIn("Current prompt terms", prompt)
+        self.assertIn("12", prompt)
 
     def test_normalize_tracking_rows_with_flexible_keys(self) -> None:
         rows = [
@@ -175,6 +188,7 @@ class VideoCycleHelpersTest(unittest.TestCase):
         )
         self.assertEqual(len(full["phase_3_normalized_tracks"]["rows"]), len(normalized_tracks))
         self.assertEqual(len(full["phase_6_embeddings"]["rows"]), len(embeddings))
+        self.assertIn("llm_postprocess", full["phase_2_vocabulary"])
 
     def test_convert_bytetrack_mot_rows(self) -> None:
         mot_rows = [
@@ -207,6 +221,22 @@ class VideoCycleHelpersTest(unittest.TestCase):
         }
         text = extract_chat_completion_text(response)
         self.assertEqual(text, "The frame shows a red car and a white SUV.")
+
+    def test_parse_vocab_postprocess_output(self) -> None:
+        raw = """
+```json
+{
+  "detection_terms": ["car", "truck", "car", "billboard"],
+  "scene_terms": ["highway", "cloudy sky"],
+  "dropped_terms": ["visible", "show"],
+  "canonical_map": {"cars": "car", "trucks": "truck"}
+}
+```
+"""
+        parsed = parse_vocab_postprocess_output(raw, max_detection_terms=3)
+        self.assertEqual(parsed["detection_terms"], ["car", "truck", "billboard"])
+        self.assertIn("highway", parsed["scene_terms"])
+        self.assertEqual(parsed["canonical_map"]["cars"], "car")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .video_cycle import (
+    LLMVocabPostprocessConfig,
     VLMCaptionConfig,
     convert_bytetrack_mot_file,
     run_video_cycle,
@@ -70,6 +71,26 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vlm-timeout-sec", type=float, default=60.0, help="VLM request timeout")
     parser.add_argument("--vlm-temperature", type=float, default=0.0, help="VLM sampling temperature")
     parser.add_argument("--vlm-api-key", default=None, help="Optional bearer token for VLM endpoint")
+    parser.add_argument(
+        "--llm-postprocess-vocab",
+        action="store_true",
+        help="Post-process discovered vocabulary using an LLM and use returned detection_terms",
+    )
+    parser.add_argument(
+        "--llm-postprocess-endpoint",
+        default=None,
+        help="Endpoint for vocab postprocess LLM (defaults to --vlm-endpoint)",
+    )
+    parser.add_argument(
+        "--llm-postprocess-model",
+        default=None,
+        help="Model for vocab postprocess LLM (defaults to --vlm-model)",
+    )
+    parser.add_argument("--llm-postprocess-max-tokens", type=int, default=500)
+    parser.add_argument("--llm-postprocess-timeout-sec", type=float, default=60.0)
+    parser.add_argument("--llm-postprocess-temperature", type=float, default=0.0)
+    parser.add_argument("--llm-postprocess-api-key", default=None)
+    parser.add_argument("--llm-postprocess-max-detection-terms", type=int, default=20)
     parser.add_argument("--synonyms", default=None, help="Optional synonym map JSON path")
     parser.add_argument(
         "--seed-labels",
@@ -142,12 +163,26 @@ def main() -> int:
         )
         vlm_config.validate()
 
+    llm_vocab_config = None
+    if args.llm_postprocess_vocab:
+        llm_vocab_config = LLMVocabPostprocessConfig(
+            endpoint=args.llm_postprocess_endpoint or args.vlm_endpoint,
+            model=args.llm_postprocess_model or args.vlm_model,
+            max_tokens=int(args.llm_postprocess_max_tokens),
+            timeout_sec=float(args.llm_postprocess_timeout_sec),
+            temperature=float(args.llm_postprocess_temperature),
+            api_key=args.llm_postprocess_api_key or args.vlm_api_key,
+            max_detection_terms=int(args.llm_postprocess_max_detection_terms),
+        )
+        llm_vocab_config.validate()
+
     summary = run_video_cycle(
         video_path=args.video,
         tracks_path=tracks_path,
         output_dir=out_dir,
         captions_path=args.captions,
         vlm_caption_config=vlm_config,
+        llm_vocab_postprocess_config=llm_vocab_config,
         synonyms_path=args.synonyms,
         seed_labels=_parse_seed_labels(args.seed_labels),
         target_fps=args.target_fps,
