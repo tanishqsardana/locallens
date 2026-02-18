@@ -171,6 +171,28 @@ class GroundingDINOConfig:
             raise ValueError("max_frames must be >= 0")
 
 
+@dataclass(slots=True)
+class YOLOWorldConfig:
+    model: str = "yolov8s-worldv2.pt"
+    confidence: float = 0.2
+    iou_threshold: float = 0.7
+    device: str = "cuda"
+    frame_stride: int = 1
+    max_frames: int = 0
+
+    def validate(self) -> None:
+        if not self.model.strip():
+            raise ValueError("model cannot be empty")
+        if self.confidence < 0 or self.confidence > 1:
+            raise ValueError("confidence must be in [0, 1]")
+        if self.iou_threshold < 0 or self.iou_threshold > 1:
+            raise ValueError("iou_threshold must be in [0, 1]")
+        if self.frame_stride <= 0:
+            raise ValueError("frame_stride must be > 0")
+        if self.max_frames < 0:
+            raise ValueError("max_frames must be >= 0")
+
+
 def _ensure_cv2() -> Any:
     try:
         import cv2  # type: ignore
@@ -794,6 +816,7 @@ def generate_groundingdino_detections(
     frames_attempted = 0
     frames_processed = 0
     frames_failed = 0
+    first_error: str | None = None
 
     for idx, row in enumerate(sampled_rows):
         if idx % stride != 0:
@@ -840,8 +863,10 @@ def generate_groundingdino_detections(
                     }
                 )
             frames_processed += 1
-        except Exception:
+        except Exception as exc:
             frames_failed += 1
+            if first_error is None:
+                first_error = str(exc)
 
     detections.sort(key=lambda item: (int(item["frame_idx"]), float(item["time_sec"]), str(item["class"])))
     class_counts = Counter(str(item["class"]) for item in detections)
@@ -854,6 +879,117 @@ def generate_groundingdino_detections(
         "class_row_counts": dict(sorted(class_counts.items(), key=lambda kv: kv[0])),
         "prompt_terms": list(prompt_terms),
         "caption": caption,
+        "first_error": first_error,
+        "config": asdict(config),
+    }
+    return detections, report
+
+
+def generate_yoloworld_detections(
+    sampled_rows: Sequence[Mapping[str, Any]],
+    *,
+    prompt_terms: Sequence[str],
+    config: YOLOWorldConfig,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Run YOLO-World on sampled frames to produce frame-level detections.
+    """
+    config.validate()
+    try:
+        from ultralytics import YOLOWorld  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "ultralytics is required for --auto-detections-yoloworld. "
+            "Install with: pip install ultralytics"
+        ) from exc
+
+    clean_terms = [term.strip().lower() for term in prompt_terms if term and term.strip()]
+    if not clean_terms:
+        raise ValueError("YOLO-World prompt terms cannot be empty")
+
+    model = YOLOWorld(config.model)
+    model.set_classes(clean_terms)
+
+    stride = max(1, int(config.frame_stride))
+    detections: list[dict[str, Any]] = []
+    frames_attempted = 0
+    frames_processed = 0
+    frames_failed = 0
+    first_error: str | None = None
+
+    for idx, row in enumerate(sampled_rows):
+        if idx % stride != 0:
+            continue
+        if config.max_frames > 0 and frames_attempted >= config.max_frames:
+            break
+        frames_attempted += 1
+
+        image_path = row.get("image_path")
+        if not isinstance(image_path, str) or not image_path:
+            frames_failed += 1
+            if first_error is None:
+                first_error = "missing_image_path"
+            continue
+
+        frame_idx = int(row.get("frame_idx", 0))
+        time_sec = float(row.get("time_sec", 0.0))
+
+        try:
+            results = model.predict(
+                source=image_path,
+                conf=float(config.confidence),
+                iou=float(config.iou_threshold),
+                device=config.device,
+                verbose=False,
+            )
+            if not results:
+                frames_processed += 1
+                continue
+            result = results[0]
+            names = result.names if hasattr(result, "names") else {}
+            boxes = getattr(result, "boxes", None)
+            if boxes is None:
+                frames_processed += 1
+                continue
+            xyxy = boxes.xyxy.tolist() if hasattr(boxes, "xyxy") else []
+            confs = boxes.conf.tolist() if hasattr(boxes, "conf") else []
+            classes = boxes.cls.tolist() if hasattr(boxes, "cls") else []
+            for i, bbox in enumerate(xyxy):
+                if not isinstance(bbox, list) or len(bbox) != 4:
+                    continue
+                cls_idx = int(classes[i]) if i < len(classes) else -1
+                raw_label = names.get(cls_idx, str(cls_idx)) if isinstance(names, dict) else str(cls_idx)
+                label = str(raw_label).strip().lower()
+                if not label:
+                    continue
+                confidence = float(confs[i]) if i < len(confs) else 0.0
+                detections.append(
+                    {
+                        "class": label,
+                        "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                        "confidence": confidence,
+                        "frame_idx": frame_idx,
+                        "time_sec": time_sec,
+                    }
+                )
+            frames_processed += 1
+        except Exception as exc:
+            frames_failed += 1
+            if first_error is None:
+                first_error = str(exc)
+
+    detections.sort(key=lambda item: (int(item["frame_idx"]), float(item["time_sec"]), str(item["class"])))
+    class_counts = Counter(str(item["class"]) for item in detections)
+    report = {
+        "status": "generated",
+        "detector": "yolo_world",
+        "frames_attempted": frames_attempted,
+        "frames_processed": frames_processed,
+        "frames_failed": frames_failed,
+        "detection_row_count": len(detections),
+        "class_row_counts": dict(sorted(class_counts.items(), key=lambda kv: kv[0])),
+        "prompt_terms": clean_terms,
+        "first_error": first_error,
         "config": asdict(config),
     }
     return detections, report
@@ -1612,6 +1748,7 @@ def run_video_cycle(
     *,
     detections_path: str | Path | None = None,
     groundingdino_config: GroundingDINOConfig | None = None,
+    yoloworld_config: YOLOWorldConfig | None = None,
     detections_output_path: str | Path | None = None,
     detection_tracking_config: DetectionTrackingConfig | None = None,
     tracked_rows_output_path: str | Path | None = None,
@@ -1734,9 +1871,16 @@ def run_video_cycle(
             encoding="utf-8",
         )
 
-    input_count = int(bool(tracks_path)) + int(bool(detections_path)) + int(bool(groundingdino_config))
+    input_count = (
+        int(bool(tracks_path))
+        + int(bool(detections_path))
+        + int(bool(groundingdino_config))
+        + int(bool(yoloworld_config))
+    )
     if input_count != 1:
-        raise ValueError("Provide exactly one of tracks_path, detections_path, or groundingdino_config")
+        raise ValueError(
+            "Provide exactly one of tracks_path, detections_path, groundingdino_config, or yoloworld_config"
+        )
 
     rows: list[dict[str, Any]]
     track_source = "tracks_json"
@@ -1756,6 +1900,42 @@ def run_video_cycle(
             config=groundingdino_config,
         )
         effective_detections_path = detections_output_path or (out_dir / "groundingdino_detections_generated.json")
+        detections_file = Path(effective_detections_path)
+        detections_file.parent.mkdir(parents=True, exist_ok=True)
+        detections_file.write_text(
+            json.dumps(generated_detections, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        normalized_detections = normalize_detection_rows(
+            generated_detections,
+            synonym_map=synonym_map,
+            allowed_labels=allowed_labels,
+        )
+        effective_tracking_config = detection_tracking_config or DetectionTrackingConfig()
+        tracked_rows, detection_tracking_report = track_detections(
+            normalized_detections,
+            config=effective_tracking_config,
+            fps=manifest.fps,
+        )
+        effective_tracked_path = tracked_rows_output_path or (out_dir / "tracked_rows.json")
+        tracked_rows_file = Path(effective_tracked_path)
+        tracked_rows_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_rows_file.write_text(
+            json.dumps(tracked_rows, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        rows = tracked_rows
+    elif yoloworld_config:
+        track_source = "yoloworld_iou_tracker"
+        generation_terms = prompts or list(seed_labels or [])
+        if not generation_terms:
+            generation_terms = ["car", "truck", "person"]
+        generated_detections, detection_generation_report = generate_yoloworld_detections(
+            sampled_rows=sampled_rows,
+            prompt_terms=generation_terms,
+            config=yoloworld_config,
+        )
+        effective_detections_path = detections_output_path or (out_dir / "yoloworld_detections_generated.json")
         detections_file = Path(effective_detections_path)
         detections_file.parent.mkdir(parents=True, exist_ok=True)
         detections_file.write_text(
@@ -1897,6 +2077,8 @@ def run_video_cycle(
         "detections": (
             str(detections_output_path or (out_dir / "groundingdino_detections_generated.json"))
             if groundingdino_config
+            else str(detections_output_path or (out_dir / "yoloworld_detections_generated.json"))
+            if yoloworld_config
             else str(detections_path)
             if detections_path
             else None
@@ -1906,7 +2088,11 @@ def run_video_cycle(
         "keyframes": str(out_dir / "moment_keyframes.json"),
         "moment_index_db": str(db_path),
         "phase_outputs": str(phase_outputs_path),
-        "tracked_rows": str(tracked_rows_output_path or (out_dir / "tracked_rows.json")) if detections_path else None,
+        "tracked_rows": (
+            str(tracked_rows_output_path or (out_dir / "tracked_rows.json"))
+            if (detections_path or groundingdino_config or yoloworld_config)
+            else None
+        ),
         "captions": str(effective_captions_path) if effective_captions_path else None,
         "tracks_report": str(effective_tracks_report_path),
         "vocab_postprocess": str(effective_vocab_postprocess_path) if effective_vocab_postprocess_path else None,

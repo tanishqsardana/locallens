@@ -7,6 +7,7 @@ from pathlib import Path
 from .video_cycle import (
     DetectionTrackingConfig,
     GroundingDINOConfig,
+    YOLOWorldConfig,
     LLMVocabPostprocessConfig,
     TrackProcessingConfig,
     VLMCaptionConfig,
@@ -47,6 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run GroundingDINO on sampled frames inside pipeline and use those detections for tracking.",
     )
+    parser.add_argument(
+        "--auto-detections-yoloworld",
+        action="store_true",
+        help="Run YOLO-World on sampled frames inside pipeline and use those detections for tracking.",
+    )
     parser.add_argument("--groundingdino-config-path", default=None, help="GroundingDINO model config file path")
     parser.add_argument("--groundingdino-weights-path", default=None, help="GroundingDINO model weights file path")
     parser.add_argument("--groundingdino-box-threshold", type=float, default=0.25)
@@ -54,6 +60,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--groundingdino-device", default="cuda")
     parser.add_argument("--groundingdino-frame-stride", type=int, default=1)
     parser.add_argument("--groundingdino-max-frames", type=int, default=0)
+    parser.add_argument("--yoloworld-model", default="yolov8s-worldv2.pt")
+    parser.add_argument("--yoloworld-confidence", type=float, default=0.2)
+    parser.add_argument("--yoloworld-iou-threshold", type=float, default=0.7)
+    parser.add_argument("--yoloworld-device", default="cuda")
+    parser.add_argument("--yoloworld-frame-stride", type=int, default=1)
+    parser.add_argument("--yoloworld-max-frames", type=int, default=0)
     parser.add_argument(
         "--bytetrack-class",
         default="car",
@@ -173,10 +185,12 @@ def main() -> int:
         + int(bool(args.bytetrack_txt))
         + int(bool(args.detections))
         + int(bool(args.auto_detections_groundingdino))
+        + int(bool(args.auto_detections_yoloworld))
     )
     if input_count != 1:
         raise ValueError(
-            "Provide exactly one of --tracks, --bytetrack-txt, --detections, or --auto-detections-groundingdino"
+            "Provide exactly one of --tracks, --bytetrack-txt, --detections, "
+            "--auto-detections-groundingdino, or --auto-detections-yoloworld"
         )
 
     out_dir = Path(args.out_dir)
@@ -185,6 +199,7 @@ def main() -> int:
     tracks_path: str | None = None
     detections_path: str | None = None
     groundingdino_config: GroundingDINOConfig | None = None
+    yoloworld_config: YOLOWorldConfig | None = None
     if args.tracks:
         tracks_path = args.tracks
     elif args.bytetrack_txt:
@@ -217,6 +232,16 @@ def main() -> int:
             max_frames=int(args.groundingdino_max_frames),
         )
         groundingdino_config.validate()
+    elif args.auto_detections_yoloworld:
+        yoloworld_config = YOLOWorldConfig(
+            model=str(args.yoloworld_model),
+            confidence=float(args.yoloworld_confidence),
+            iou_threshold=float(args.yoloworld_iou_threshold),
+            device=str(args.yoloworld_device),
+            frame_stride=int(args.yoloworld_frame_stride),
+            max_frames=int(args.yoloworld_max_frames),
+        )
+        yoloworld_config.validate()
     else:
         raise ValueError("Provide exactly one input source")
 
@@ -268,8 +293,13 @@ def main() -> int:
         tracks_path=tracks_path,
         detections_path=detections_path,
         groundingdino_config=groundingdino_config,
+        yoloworld_config=yoloworld_config,
         output_dir=out_dir,
-        detection_tracking_config=detection_tracking_config if detections_path else None,
+        detection_tracking_config=(
+            detection_tracking_config
+            if (detections_path or groundingdino_config or yoloworld_config)
+            else None
+        ),
         captions_path=args.captions,
         vlm_caption_config=vlm_config,
         llm_vocab_postprocess_config=llm_vocab_config,

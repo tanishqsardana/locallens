@@ -20,7 +20,8 @@ app = [
   "streamlit>=1.39"
 ]
 video = [
-  "opencv-python-headless>=4.9"
+  "opencv-python-headless>=4.9",
+  "ultralytics>=8.3.0"
 ]
 
 [tool.setuptools]

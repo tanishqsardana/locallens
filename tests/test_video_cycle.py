@@ -8,6 +8,7 @@ from videosearch.video_cycle import (
     DetectionTrackingConfig,
     TrackProcessingConfig,
     VideoManifest,
+    YOLOWorldConfig,
     build_phase_outputs,
     build_keyframe_targets,
     build_groundingdino_caption,
@@ -25,6 +26,10 @@ from videosearch.video_cycle import (
 
 
 class VideoCycleHelpersTest(unittest.TestCase):
+    def test_yoloworld_config_validate(self) -> None:
+        cfg = YOLOWorldConfig()
+        cfg.validate()
+
     def test_extract_object_nouns(self) -> None:
         captions = [
             "A red cars waits near the crosswalk.",
