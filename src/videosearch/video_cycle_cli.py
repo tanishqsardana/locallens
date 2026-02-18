@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .video_cycle import (
     LLMVocabPostprocessConfig,
+    TrackProcessingConfig,
     VLMCaptionConfig,
     convert_bytetrack_mot_file,
     run_video_cycle,
@@ -98,6 +99,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated seed labels for prompt terms",
     )
     parser.add_argument("--target-fps", type=float, default=10.0, help="Video ingest sample FPS")
+    parser.add_argument("--track-min-confidence", type=float, default=0.0)
+    parser.add_argument("--track-min-length", type=int, default=1, help="Minimum detections per track to keep")
+    parser.add_argument(
+        "--track-max-interp-gap",
+        type=int,
+        default=0,
+        help="Interpolate missing detections for gaps up to this many frames",
+    )
+    parser.add_argument(
+        "--track-no-clip-bbox",
+        action="store_true",
+        help="Disable clipping bounding boxes to frame bounds",
+    )
     parser.add_argument(
         "--moment-config",
         default=None,
@@ -163,6 +177,14 @@ def main() -> int:
         )
         vlm_config.validate()
 
+    track_config = TrackProcessingConfig(
+        min_confidence=float(args.track_min_confidence),
+        min_track_length_frames=int(args.track_min_length),
+        max_interp_gap_frames=int(args.track_max_interp_gap),
+        clip_bboxes_to_frame=not bool(args.track_no_clip_bbox),
+    )
+    track_config.validate()
+
     llm_vocab_config = None
     if args.llm_postprocess_vocab:
         llm_vocab_config = LLMVocabPostprocessConfig(
@@ -187,6 +209,7 @@ def main() -> int:
         seed_labels=_parse_seed_labels(args.seed_labels),
         target_fps=args.target_fps,
         moment_overrides=_load_moment_overrides(args.moment_config),
+        track_processing_config=track_config,
         include_full_phase_outputs=bool(args.show_full_phase_outputs),
         phase_preview_limit=int(args.phase_preview_limit),
     )

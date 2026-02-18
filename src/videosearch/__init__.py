@@ -7,6 +7,7 @@ from .pipeline import VideoSemanticSearch
 from .types import TranscriptSegment, VideoChunk, VideoTranscript
 from .video_cycle import (
     LLMVocabPostprocessConfig,
+    TrackProcessingConfig,
     VLMCaptionConfig,
     VideoManifest,
     build_vocab_postprocess_prompt,
@@ -21,6 +22,7 @@ from .video_cycle import (
     generate_vlm_captions,
     normalize_tracking_rows,
     parse_vocab_postprocess_output,
+    process_tracking_rows,
     postprocess_vocabulary_with_llm,
     run_video_cycle,
     video_fps,
@@ -31,6 +33,7 @@ __all__ = [
     "ChunkConfig",
     "HashingEmbedder",
     "LLMVocabPostprocessConfig",
+    "TrackProcessingConfig",
     "VLMCaptionConfig",
     "VideoManifest",
     "Moment",
@@ -50,6 +53,7 @@ __all__ = [
     "generate_vlm_captions",
     "normalize_tracking_rows",
     "parse_vocab_postprocess_output",
+    "process_tracking_rows",
     "postprocess_vocabulary_with_llm",
     "run_video_cycle",
     "video_fps",

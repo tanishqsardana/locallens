@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 
 from videosearch.video_cycle import (
+    TrackProcessingConfig,
     VideoManifest,
     build_phase_outputs,
     build_keyframe_targets,
@@ -15,6 +16,7 @@ from videosearch.video_cycle import (
     extract_object_nouns,
     normalize_tracking_rows,
     parse_vocab_postprocess_output,
+    process_tracking_rows,
 )
 
 
@@ -77,6 +79,30 @@ class VideoCycleHelpersTest(unittest.TestCase):
         self.assertEqual(len(normalized), 2)
         self.assertEqual(normalized[0]["class"], "car")
         self.assertEqual(normalized[1]["class"], "truck")
+
+    def test_process_tracking_rows_filters_and_interpolates(self) -> None:
+        rows = [
+            {"track_id": 1, "class": "car", "bbox": [10, 20, 30, 40], "confidence": 0.9, "frame_idx": 0, "time_sec": 0.0},
+            {"track_id": 1, "class": "car", "bbox": [12, 20, 32, 40], "confidence": 0.9, "frame_idx": 2, "time_sec": 0.2},
+            {"track_id": 2, "class": "car", "bbox": [50, 50, 60, 60], "confidence": 0.2, "frame_idx": 5, "time_sec": 0.5},
+            {"track_id": 3, "class": "truck", "bbox": [70, 70, 80, 80], "confidence": 0.95, "frame_idx": 10, "time_sec": 1.0},
+        ]
+        processed, report = process_tracking_rows(
+            rows,
+            config=TrackProcessingConfig(
+                min_confidence=0.5,
+                min_track_length_frames=2,
+                max_interp_gap_frames=1,
+                clip_bboxes_to_frame=True,
+            ),
+            frame_width=100,
+            frame_height=100,
+            fps=10.0,
+        )
+        self.assertGreaterEqual(len(processed), 3)  # includes one interpolated frame
+        self.assertEqual(report["removed_low_confidence_count"], 1)
+        self.assertEqual(report["removed_short_track_count"], 1)
+        self.assertGreaterEqual(report["interpolated_rows_added_count"], 1)
 
     def test_build_keyframe_targets(self) -> None:
         moments = [

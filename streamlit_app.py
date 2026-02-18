@@ -257,7 +257,12 @@ def _render_cycle_inspector() -> None:
     with tabs[2]:
         st.subheader("Normalized Tracks")
         st.write(f"Raw rows: `{p3.get('raw_track_row_count', 0)}`")
-        st.write(f"Normalized rows: `{p3.get('normalized_track_row_count', 0)}`")
+        st.write(f"Canonicalized rows: `{p3.get('canonicalized_track_row_count', p3.get('normalized_track_row_count', 0))}`")
+        st.write(f"Processed rows: `{p3.get('processed_track_row_count', p3.get('normalized_track_row_count', 0))}`")
+        track_processing = p3.get("track_processing", {})
+        if isinstance(track_processing, dict) and track_processing:
+            st.write("Track processing report:")
+            st.json(track_processing)
         track_rows = _as_rows(p3.get("rows"))
         if track_rows:
             st.dataframe(track_rows, use_container_width=True)

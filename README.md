@@ -151,6 +151,12 @@ PYTHONPATH=src python -m videosearch.video_cycle_cli \
   --show-phase-outputs
 ```
 
+Phase 3 track processing controls:
+- `--track-min-confidence` (drop low-confidence rows)
+- `--track-min-length` (drop short tracks)
+- `--track-max-interp-gap` (optional interpolation for short missing gaps)
+- `--track-no-clip-bbox` (disable bbox clipping to frame bounds)
+
 Auto-generate captions from a local vLLM VLM endpoint (OpenAI-compatible):
 
 ```bash
@@ -186,6 +192,7 @@ Pipeline artifacts:
 - `data/video_cycle_run/vlm_captions_generated.json` (if `--auto-captions` is used)
 - `data/video_cycle_run/vocab_postprocess.json` (if `--llm-postprocess-vocab` is used)
 - `data/video_cycle_run/normalized_tracks.json`
+- `data/video_cycle_run/tracks_report.json`
 - `data/video_cycle_run/moments.json`
 - `data/video_cycle_run/moment_keyframes.json`
 - `data/video_cycle_run/moment_index.sqlite`

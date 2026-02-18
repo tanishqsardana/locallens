@@ -114,6 +114,22 @@ class LLMVocabPostprocessConfig:
             raise ValueError("max_detection_terms must be > 0")
 
 
+@dataclass(slots=True)
+class TrackProcessingConfig:
+    min_confidence: float = 0.0
+    min_track_length_frames: int = 1
+    max_interp_gap_frames: int = 0
+    clip_bboxes_to_frame: bool = True
+
+    def validate(self) -> None:
+        if self.min_confidence < 0:
+            raise ValueError("min_confidence must be >= 0")
+        if self.min_track_length_frames <= 0:
+            raise ValueError("min_track_length_frames must be > 0")
+        if self.max_interp_gap_frames < 0:
+            raise ValueError("max_interp_gap_frames must be >= 0")
+
+
 def _ensure_cv2() -> Any:
     try:
         import cv2  # type: ignore
@@ -683,6 +699,174 @@ def postprocess_vocabulary_with_llm(
     }
 
 
+def _clamp_bbox_to_frame(bbox: Sequence[float], frame_width: int, frame_height: int) -> list[float]:
+    x1, y1, x2, y2 = [float(value) for value in bbox]
+    max_x = float(max(1, frame_width))
+    max_y = float(max(1, frame_height))
+    x1 = min(max(0.0, x1), max_x)
+    y1 = min(max(0.0, y1), max_y)
+    x2 = min(max(0.0, x2), max_x)
+    y2 = min(max(0.0, y2), max_y)
+    return [x1, y1, x2, y2]
+
+
+def _track_length_stats(lengths: Sequence[int]) -> dict[str, float]:
+    if not lengths:
+        return {"min": 0.0, "max": 0.0, "avg": 0.0, "median": 0.0}
+    arr = np.array(lengths, dtype=np.float32)
+    return {
+        "min": float(arr.min()),
+        "max": float(arr.max()),
+        "avg": float(arr.mean()),
+        "median": float(np.median(arr)),
+    }
+
+
+def process_tracking_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    config: TrackProcessingConfig,
+    frame_width: int,
+    frame_height: int,
+    fps: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Phase 3 track processing:
+    - deduplicate frame+track rows
+    - confidence + bbox filtering
+    - remove short tracks
+    - optional temporal interpolation for short gaps
+    """
+    config.validate()
+    if fps <= 0:
+        fps = 30.0
+
+    input_rows = [dict(item) for item in rows]
+    input_count = len(input_rows)
+
+    # Keep highest-confidence row when frame_idx and track_id collide.
+    dedup: dict[tuple[int, Any], dict[str, Any]] = {}
+    for row in input_rows:
+        key = (int(row["frame_idx"]), row["track_id"])
+        existing = dedup.get(key)
+        if existing is None or float(row.get("confidence", 0.0)) > float(existing.get("confidence", 0.0)):
+            dedup[key] = dict(row)
+    dedup_rows = sorted(dedup.values(), key=lambda r: (int(r["frame_idx"]), float(r["time_sec"]), str(r["track_id"])))
+    dedup_removed_count = input_count - len(dedup_rows)
+
+    cleaned_rows: list[dict[str, Any]] = []
+    removed_low_conf = 0
+    removed_invalid_bbox = 0
+    for row in dedup_rows:
+        conf = float(row.get("confidence", 0.0))
+        if conf < config.min_confidence:
+            removed_low_conf += 1
+            continue
+        bbox = [float(v) for v in row["bbox"]]
+        if config.clip_bboxes_to_frame:
+            bbox = _clamp_bbox_to_frame(bbox, frame_width=frame_width, frame_height=frame_height)
+        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            removed_invalid_bbox += 1
+            continue
+        out = dict(row)
+        out["confidence"] = conf
+        out["bbox"] = bbox
+        cleaned_rows.append(out)
+
+    tracks_before: dict[Any, list[dict[str, Any]]] = {}
+    for row in cleaned_rows:
+        tracks_before.setdefault(row["track_id"], []).append(row)
+    for obs in tracks_before.values():
+        obs.sort(key=lambda r: int(r["frame_idx"]))
+
+    short_track_ids: set[Any] = set()
+    for track_id, obs in tracks_before.items():
+        if len(obs) < config.min_track_length_frames:
+            short_track_ids.add(track_id)
+
+    removed_short_track_rows = sum(len(tracks_before[tid]) for tid in short_track_ids)
+    tracks_kept: dict[Any, list[dict[str, Any]]] = {
+        track_id: obs for track_id, obs in tracks_before.items() if track_id not in short_track_ids
+    }
+
+    interpolated_rows_added = 0
+    if config.max_interp_gap_frames > 0:
+        for track_id, obs in list(tracks_kept.items()):
+            if len(obs) <= 1:
+                continue
+            expanded: list[dict[str, Any]] = [dict(obs[0])]
+            for prev, curr in zip(obs, obs[1:]):
+                prev_frame = int(prev["frame_idx"])
+                curr_frame = int(curr["frame_idx"])
+                gap = curr_frame - prev_frame
+                if 1 < gap <= (config.max_interp_gap_frames + 1):
+                    prev_bbox = [float(v) for v in prev["bbox"]]
+                    curr_bbox = [float(v) for v in curr["bbox"]]
+                    for step in range(1, gap):
+                        alpha = step / gap
+                        frame_idx = prev_frame + step
+                        interp_bbox = [
+                            prev_bbox[0] + alpha * (curr_bbox[0] - prev_bbox[0]),
+                            prev_bbox[1] + alpha * (curr_bbox[1] - prev_bbox[1]),
+                            prev_bbox[2] + alpha * (curr_bbox[2] - prev_bbox[2]),
+                            prev_bbox[3] + alpha * (curr_bbox[3] - prev_bbox[3]),
+                        ]
+                        if config.clip_bboxes_to_frame:
+                            interp_bbox = _clamp_bbox_to_frame(
+                                interp_bbox,
+                                frame_width=frame_width,
+                                frame_height=frame_height,
+                            )
+                        interp = dict(prev)
+                        interp["frame_idx"] = frame_idx
+                        interp["time_sec"] = frame_idx / fps
+                        interp["bbox"] = interp_bbox
+                        interp["confidence"] = min(float(prev["confidence"]), float(curr["confidence"]))
+                        interp["interpolated"] = True
+                        expanded.append(interp)
+                        interpolated_rows_added += 1
+                expanded.append(dict(curr))
+            expanded.sort(key=lambda r: int(r["frame_idx"]))
+            tracks_kept[track_id] = expanded
+
+    output_rows: list[dict[str, Any]] = []
+    for obs in tracks_kept.values():
+        output_rows.extend(obs)
+    output_rows.sort(key=lambda r: (int(r["frame_idx"]), float(r["time_sec"]), str(r["track_id"])))
+
+    track_lengths_before = [len(obs) for obs in tracks_before.values()]
+    track_lengths_after = [len(obs) for obs in tracks_kept.values()]
+    class_row_counts = Counter(str(row.get("class", "unknown")) for row in output_rows)
+    class_track_counts = Counter(str(obs[0].get("class", "unknown")) for obs in tracks_kept.values() if obs)
+
+    duration_sec = 0.0
+    if output_rows:
+        start_t = float(output_rows[0]["time_sec"])
+        end_t = float(output_rows[-1]["time_sec"])
+        duration_sec = max(1e-6, end_t - start_t)
+
+    report = {
+        "input_row_count": input_count,
+        "dedup_removed_count": dedup_removed_count,
+        "after_dedup_row_count": len(dedup_rows),
+        "removed_low_confidence_count": removed_low_conf,
+        "removed_invalid_bbox_count": removed_invalid_bbox,
+        "removed_short_track_rows_count": removed_short_track_rows,
+        "removed_short_track_count": len(short_track_ids),
+        "interpolated_rows_added_count": interpolated_rows_added,
+        "output_row_count": len(output_rows),
+        "track_count_before_length_filter": len(tracks_before),
+        "track_count_after_processing": len(tracks_kept),
+        "track_length_stats_before": _track_length_stats(track_lengths_before),
+        "track_length_stats_after": _track_length_stats(track_lengths_after),
+        "class_row_counts": dict(sorted(class_row_counts.items(), key=lambda item: item[0])),
+        "class_track_counts": dict(sorted(class_track_counts.items(), key=lambda item: item[0])),
+        "rows_per_second": float(len(output_rows) / duration_sec) if duration_sec > 0 else 0.0,
+        "config": asdict(config),
+    }
+    return output_rows, report
+
+
 def normalize_tracking_rows(
     rows: Iterable[Mapping[str, Any]],
     synonym_map: Mapping[str, str] | None = None,
@@ -1015,6 +1199,8 @@ def build_phase_outputs(
     discovered_labels: Sequence[str],
     prompt_terms: Sequence[str],
     phase2_status: str,
+    canonicalized_tracks: Sequence[Mapping[str, Any]] | None = None,
+    track_processing_report: Mapping[str, Any] | None = None,
     llm_vocab_postprocess: Mapping[str, Any] | None = None,
     include_full: bool = False,
     preview_limit: int = 25,
@@ -1054,7 +1240,10 @@ def build_phase_outputs(
         },
         "phase_3_normalized_tracks": {
             "raw_track_row_count": len(raw_tracks),
+            "canonicalized_track_row_count": len(canonicalized_tracks or []),
+            "processed_track_row_count": len(normalized_tracks),
             "normalized_track_row_count": len(normalized_tracks),
+            "track_processing": dict(track_processing_report or {}),
             "rows": _slice_for_report(
                 normalized_tracks,
                 include_full=include_full,
@@ -1106,6 +1295,8 @@ def run_video_cycle(
     seed_labels: Sequence[str] | None = None,
     target_fps: float = 10.0,
     moment_overrides: Mapping[str, Any] | None = None,
+    track_processing_config: TrackProcessingConfig | None = None,
+    tracks_report_output_path: str | Path | None = None,
     vlm_caption_config: VLMCaptionConfig | None = None,
     captions_output_path: str | Path | None = None,
     llm_vocab_postprocess_config: LLMVocabPostprocessConfig | None = None,
@@ -1219,10 +1410,25 @@ def run_video_cycle(
 
     rows = load_json_rows(tracks_path)
     allowed_labels = set(prompts) if prompts else None
-    normalized = normalize_tracking_rows(rows, synonym_map=synonym_map, allowed_labels=allowed_labels)
+    canonicalized_tracks = normalize_tracking_rows(rows, synonym_map=synonym_map, allowed_labels=allowed_labels)
+    effective_track_config = track_processing_config or TrackProcessingConfig()
+    normalized, track_processing_report = process_tracking_rows(
+        canonicalized_tracks,
+        config=effective_track_config,
+        frame_width=manifest.width,
+        frame_height=manifest.height,
+        fps=manifest.fps,
+    )
 
     normalized_path = out_dir / "normalized_tracks.json"
     normalized_path.write_text(json.dumps(normalized, indent=2, ensure_ascii=True), encoding="utf-8")
+    effective_tracks_report_path = tracks_report_output_path or (out_dir / "tracks_report.json")
+    tracks_report_file = Path(effective_tracks_report_path)
+    tracks_report_file.parent.mkdir(parents=True, exist_ok=True)
+    tracks_report_file.write_text(
+        json.dumps(track_processing_report, indent=2, ensure_ascii=True),
+        encoding="utf-8",
+    )
 
     moment_config = _coerce_moment_config(moment_overrides)
     moments = generate_moments(
@@ -1258,6 +1464,8 @@ def run_video_cycle(
         sampled_rows=sampled_rows,
         raw_tracks=rows,
         normalized_tracks=normalized,
+        canonicalized_tracks=canonicalized_tracks,
+        track_processing_report=track_processing_report,
         moment_rows=moment_rows,
         keyframe_rows=keyframe_payload,
         embeddings=embeddings,
@@ -1287,6 +1495,7 @@ def run_video_cycle(
         "moment_index_db": str(db_path),
         "phase_outputs": str(phase_outputs_path),
         "captions": str(effective_captions_path) if effective_captions_path else None,
+        "tracks_report": str(effective_tracks_report_path),
         "vocab_postprocess": str(effective_vocab_postprocess_path) if effective_vocab_postprocess_path else None,
         "counts": {
             "tracks": len(normalized),
