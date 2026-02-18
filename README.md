@@ -206,6 +206,7 @@ Phase 3 track processing controls:
 - `--track-min-length` (drop short tracks)
 - `--track-max-interp-gap` (optional interpolation for short missing gaps)
 - `--track-no-clip-bbox` (disable bbox clipping to frame bounds)
+- `--moment-labels` (default: `car,truck,bus,van,person,motorcycle`; filters out static/background classes)
 
 Auto-generate captions from a local vLLM VLM endpoint (OpenAI-compatible):
 
@@ -310,6 +311,8 @@ Returned moments:
 - `STOP`
 - `NEAR`
 - `APPROACH`
+
+`DISAPPEAR` is emitted as a point event once missing-frame threshold is reached.
 
 All distances are normalized by frame diagonal. Speed uses EMA smoothing.
 Overlapping/adjacent moments with gap `< 1s` are merged.

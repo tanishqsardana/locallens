@@ -23,6 +23,12 @@ def _parse_seed_labels(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _parse_label_list(value: str | None) -> list[str]:
+    if value is None:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 def _load_moment_overrides(path: str | None) -> dict[str, object] | None:
     if not path:
         return None
@@ -129,6 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--seed-labels",
         default="car,truck,person",
         help="Comma-separated seed labels for prompt terms",
+    )
+    parser.add_argument(
+        "--moment-labels",
+        default="car,truck,bus,van,person,motorcycle",
+        help="Comma-separated labels allowed into detection/tracking/moment phases",
     )
     parser.add_argument("--target-fps", type=float, default=10.0, help="Video ingest sample FPS")
     parser.add_argument("--detect-track-iou-threshold", type=float, default=0.3)
@@ -311,6 +322,7 @@ def main() -> int:
         log_progress=bool(args.log_progress),
         synonyms_path=args.synonyms,
         seed_labels=_parse_seed_labels(args.seed_labels),
+        moment_label_allowlist=_parse_label_list(args.moment_labels),
         target_fps=args.target_fps,
         moment_overrides=_load_moment_overrides(args.moment_config),
         track_processing_config=track_config,

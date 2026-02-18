@@ -9,6 +9,7 @@ from videosearch.video_cycle import (
     TrackProcessingConfig,
     VideoManifest,
     YOLOWorldConfig,
+    build_moment_label_allowlist,
     build_phase_outputs,
     build_keyframe_targets,
     build_groundingdino_caption,
@@ -49,6 +50,10 @@ class VideoCycleHelpersTest(unittest.TestCase):
         self.assertIn("car", terms)
         self.assertIn("person", terms)
         self.assertIn("pickup truck", terms)
+
+    def test_build_moment_label_allowlist(self) -> None:
+        allow = build_moment_label_allowlist(["cars", "truck", "road"], {"cars": "car"})
+        self.assertEqual(allow, ["car", "truck", "road"])
 
     def test_build_vocab_postprocess_prompt(self) -> None:
         prompt = build_vocab_postprocess_prompt(
@@ -246,6 +251,7 @@ class VideoCycleHelpersTest(unittest.TestCase):
             caption_rows=[{"frame_idx": 0, "caption": "a car drives"}],
             discovered_labels=["car"],
             prompt_terms=["car"],
+            moment_label_allowlist=["car", "truck"],
             phase2_status="provided_captions",
             include_full=False,
             preview_limit=1,
@@ -269,6 +275,7 @@ class VideoCycleHelpersTest(unittest.TestCase):
             caption_rows=[{"frame_idx": 0, "caption": "a car drives"}],
             discovered_labels=["car"],
             prompt_terms=["car"],
+            moment_label_allowlist=["car", "truck"],
             phase2_status="provided_captions",
             include_full=True,
             preview_limit=1,

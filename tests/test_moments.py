@@ -62,7 +62,7 @@ class MomentGenerationTest(unittest.TestCase):
 
         self.assertEqual(len(disappear), 1)
         self.assertGreaterEqual(disappear[0].start_time, 1.3)
-        self.assertGreater(disappear[0].end_time, disappear[0].start_time)
+        self.assertAlmostEqual(disappear[0].end_time, disappear[0].start_time, places=3)
 
     def test_stop_event_from_speed_transition(self) -> None:
         observations: list[TrackObservation] = []
@@ -160,4 +160,3 @@ class MomentGenerationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

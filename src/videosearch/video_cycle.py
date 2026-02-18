@@ -41,6 +41,15 @@ DEFAULT_STOPWORDS = {
     "with",
 }
 
+DEFAULT_MOMENT_LABEL_ALLOWLIST = (
+    "car",
+    "truck",
+    "bus",
+    "van",
+    "person",
+    "motorcycle",
+)
+
 
 @dataclass(slots=True)
 class VideoManifest:
@@ -648,6 +657,32 @@ def build_prompt_terms(
         seen.add(clean)
         out.append(clean)
     return out
+
+
+def build_moment_label_allowlist(
+    labels: Sequence[str] | None,
+    synonym_map: Mapping[str, str],
+) -> list[str]:
+    source = labels if labels is not None else DEFAULT_MOMENT_LABEL_ALLOWLIST
+    out: list[str] = []
+    seen: set[str] = set()
+    for label in source:
+        clean = canonicalize_label(label, synonym_map)
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        out.append(clean)
+    return out
+
+
+def filter_labels_by_allowlist(
+    labels: Sequence[str],
+    allowlist: Sequence[str] | None,
+) -> list[str]:
+    if allowlist is None:
+        return list(labels)
+    allowed = set(allowlist)
+    return [label for label in labels if label in allowed]
 
 
 def _normalize_term_list(values: Any, *, max_items: int = 256) -> list[str]:
@@ -1728,6 +1763,7 @@ def build_phase_outputs(
     caption_rows: Sequence[Mapping[str, Any]] | None,
     discovered_labels: Sequence[str],
     prompt_terms: Sequence[str],
+    moment_label_allowlist: Sequence[str] | None,
     phase2_status: str,
     track_source: str = "tracks_json",
     detection_generation_report: Mapping[str, Any] | None = None,
@@ -1770,6 +1806,7 @@ def build_phase_outputs(
             "synonym_map": dict(synonym_map),
             "discovered_labels": list(discovered_labels),
             "prompt_terms": list(prompt_terms),
+            "moment_label_allowlist": list(moment_label_allowlist or []),
             "llm_postprocess": dict(llm_vocab_postprocess or {}),
         },
         "phase_3_normalized_tracks": {
@@ -1837,6 +1874,7 @@ def run_video_cycle(
     captions_path: str | Path | None = None,
     synonyms_path: str | Path | None = None,
     seed_labels: Sequence[str] | None = None,
+    moment_label_allowlist: Sequence[str] | None = None,
     target_fps: float = 10.0,
     moment_overrides: Mapping[str, Any] | None = None,
     track_processing_config: TrackProcessingConfig | None = None,
@@ -1863,6 +1901,7 @@ def run_video_cycle(
     manifest = ingest_video(video_path=video_path, output_dir=out_dir / "ingest", target_fps=target_fps)
     sampled_rows = json.loads(Path(manifest.sampled_frames_path).read_text(encoding="utf-8"))
     synonym_map = load_synonym_map(synonyms_path)
+    allowed_moment_labels = build_moment_label_allowlist(moment_label_allowlist, synonym_map)
     _log_progress(
         log_progress,
         f"Phase 1 ingest done: sampled_frames={len(sampled_rows)}, fps={manifest.fps:.2f}, duration={manifest.duration_sec:.2f}s",
@@ -1950,12 +1989,18 @@ def run_video_cycle(
                 encoding="utf-8",
             )
 
+        if allowed_moment_labels:
+            prompts = filter_labels_by_allowlist(prompts, allowed_moment_labels)
+            if not prompts:
+                prompts = list(allowed_moment_labels)
+
         (out_dir / "vocabulary.json").write_text(
             json.dumps(
                 {
                     "seed_labels": list(seed_labels or []),
                     "discovered_labels": discovered,
                     "prompt_terms": prompts,
+                    "moment_label_allowlist": allowed_moment_labels,
                     "llm_postprocess": llm_vocab_postprocess,
                 },
                 indent=2,
@@ -1964,6 +2009,13 @@ def run_video_cycle(
             encoding="utf-8",
         )
         _log_progress(log_progress, f"Phase 2 vocabulary done: prompt_terms={len(prompts)}")
+
+    if not prompts and allowed_moment_labels:
+        prompts = list(allowed_moment_labels)
+        _log_progress(
+            log_progress,
+            f"Phase 2 vocabulary skipped; using moment label allowlist as prompt_terms ({len(prompts)} labels)",
+        )
 
     input_count = (
         int(bool(tracks_path))
@@ -2179,6 +2231,7 @@ def run_video_cycle(
         caption_rows=caption_rows,
         discovered_labels=discovered,
         prompt_terms=prompts,
+        moment_label_allowlist=allowed_moment_labels,
         phase2_status=phase2_status,
         llm_vocab_postprocess=llm_vocab_postprocess,
         include_full=include_full_phase_outputs,

@@ -115,7 +115,6 @@ class _TrackState:
     seen_run: int = 1
     appear_emitted: bool = False
     missing_count: int = 0
-    active_disappear_start: float | None = None
     prev_center: tuple[float, float] | None = None
     ema_speed: float | None = None
     below_count: int = 0
@@ -206,20 +205,6 @@ class MomentGenerator:
                     prev_frame = state.last_seen_frame
                     prev_time = state.last_seen_time
                     prev_center = state.prev_center
-
-                    if state.active_disappear_start is not None:
-                        _append_moment(
-                            moments,
-                            "DISAPPEAR",
-                            state.active_disappear_start,
-                            current_time,
-                            [track_id],
-                            {
-                                "label": state.label,
-                                "label_group": state.label_group,
-                            },
-                        )
-                        state.active_disappear_start = None
 
                     if frame_idx == prev_frame + 1:
                         state.seen_run += 1
@@ -321,11 +306,18 @@ class MomentGenerator:
                     state.below_start_time = None
                     state.above_count = 0
                     state.above_start_time = None
-                if (
-                    state.active_disappear_start is None
-                    and state.missing_count >= self.config.disappear_missing_frames
-                ):
-                    state.active_disappear_start = current_time
+                if state.missing_count == self.config.disappear_missing_frames:
+                    _append_moment(
+                        moments,
+                        "DISAPPEAR",
+                        current_time,
+                        current_time,
+                        [track_id],
+                        {
+                            "label": state.label,
+                            "label_group": state.label_group,
+                        },
+                    )
 
             # Pair-level updates.
             seen_pairs: set[tuple[TrackId, TrackId]] = set()
@@ -637,19 +629,6 @@ class MomentGenerator:
                         "min_speed": state.min_stop_speed,
                     },
                 )
-            if state.active_disappear_start is not None:
-                _append_moment(
-                    moments,
-                    "DISAPPEAR",
-                    state.active_disappear_start,
-                    video_end_time,
-                    [track_id],
-                    {
-                        "label": state.label,
-                        "label_group": state.label_group,
-                    },
-                )
-
         for pair_state in pair_states.values():
             if pair_state.near_active_start is not None:
                 _append_moment(
@@ -845,4 +824,3 @@ def _merge_metadata(base: dict[str, Any], other: dict[str, Any]) -> dict[str, An
         elif isinstance(existing, list) and isinstance(value, list):
             out[key] = sorted({*existing, *value})
     return out
-
