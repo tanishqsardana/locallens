@@ -334,7 +334,7 @@ PYTHONPATH=src python -m videosearch.moment_query_cli appear \
 
 `appear` now returns:
 - `appear_events` (raw APPEAR moments per track)
-- `episodes` (merged presence windows from frame ranges)
+- `episodes` (track-instance windows from frame ranges, default per-track)
 
 ```bash
 PYTHONPATH=src python -m videosearch.moment_query_cli frames-with \
@@ -394,3 +394,7 @@ PYTHONPATH=src python -m videosearch.moment_clip_cli \
 Output:
 - One MP4 per detected episode window.
 - `*_episode_clips_summary.json` with frame/time ranges, track IDs, and clip paths.
+
+Note:
+- Episode generation is per-track by default (avoids one long "car present" clip on busy roads).
+- Add `--label-union-episodes` if you want legacy merged label-presence windows.

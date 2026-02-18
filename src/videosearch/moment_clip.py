@@ -28,6 +28,7 @@ class ClipExportConfig:
     font_scale: float = 0.5
     max_gap_frames: int = 2
     min_episode_frames: int = 2
+    per_track_episodes: bool = True
     log_every_frames: int = 120
 
     def validate(self) -> None:
@@ -53,12 +54,14 @@ def build_label_episode_ranges(
     label: str,
     max_gap_frames: int,
     min_episode_frames: int,
+    per_track: bool = True,
 ) -> list[dict[str, Any]]:
     return appearance_episodes(
         tracks,
         label=label,
         max_gap_frames=max_gap_frames,
         min_episode_frames=min_episode_frames,
+        per_track=per_track,
     )
 
 
@@ -102,6 +105,7 @@ def export_label_episode_clips(
         label=target,
         max_gap_frames=cfg.max_gap_frames,
         min_episode_frames=cfg.min_episode_frames,
+        per_track=cfg.per_track_episodes,
     )
 
     cv2 = _ensure_cv2()

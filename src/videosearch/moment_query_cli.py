@@ -35,6 +35,11 @@ def build_parser() -> argparse.ArgumentParser:
     appear.add_argument("--tracks", default=None)
     appear.add_argument("--max-gap-frames", type=int, default=2)
     appear.add_argument("--min-episode-frames", type=int, default=2)
+    appear.add_argument(
+        "--label-union-episodes",
+        action="store_true",
+        help="Merge all tracks of the label into shared presence windows (legacy behavior)",
+    )
 
     frames = sub.add_parser("frames-with", help="Which frames contain a label?")
     frames.add_argument("--label", required=True)
@@ -57,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     nlq.add_argument("--tracks", default=None)
     nlq.add_argument("--frame-width", type=int, required=True)
     nlq.add_argument("--frame-height", type=int, required=True)
+    nlq.add_argument(
+        "--label-union-episodes",
+        action="store_true",
+        help="For 'appear' intent, merge all tracks of the label into shared presence windows",
+    )
 
     return parser
 
@@ -76,6 +86,7 @@ def main() -> int:
                 label=args.label,
                 max_gap_frames=int(args.max_gap_frames),
                 min_episode_frames=int(args.min_episode_frames),
+                per_track=not bool(args.label_union_episodes),
             ),
         }
         print(json.dumps(payload, indent=2, ensure_ascii=True))
@@ -117,6 +128,7 @@ def main() -> int:
             tracks=tracks,
             frame_width=int(args.frame_width),
             frame_height=int(args.frame_height),
+            per_track_episodes=not bool(args.label_union_episodes),
         )
         print(json.dumps(payload, indent=2, ensure_ascii=True))
         return 0

@@ -25,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--padding-sec", type=float, default=0.3, help="Seconds to pad before/after each episode")
     parser.add_argument("--max-gap-frames", type=int, default=2, help="Max frame gap for merging episode frames")
     parser.add_argument("--min-episode-frames", type=int, default=2, help="Minimum frames for an episode")
+    parser.add_argument(
+        "--label-union-episodes",
+        action="store_true",
+        help="Merge all tracks of the label into shared presence windows (legacy behavior)",
+    )
     parser.add_argument("--no-overlay-boxes", action="store_true", help="Disable bbox overlays in exported clips")
     parser.add_argument("--line-thickness", type=int, default=2)
     parser.add_argument("--font-scale", type=float, default=0.5)
@@ -44,6 +49,7 @@ def main() -> int:
         font_scale=float(args.font_scale),
         max_gap_frames=int(args.max_gap_frames),
         min_episode_frames=int(args.min_episode_frames),
+        per_track_episodes=not bool(args.label_union_episodes),
         log_every_frames=int(args.log_every_frames),
     )
     cfg.validate()

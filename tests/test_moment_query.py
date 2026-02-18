@@ -60,6 +60,18 @@ class MomentQueryTest(unittest.TestCase):
         self.assertEqual(out[0]["start_frame"], 10)
         self.assertEqual(out[1]["start_frame"], 20)
 
+    def test_appearance_episodes_per_track_vs_union(self) -> None:
+        tracks = [
+            {"track_id": 1, "class": "car", "frame_idx": 10, "time_sec": 1.0},
+            {"track_id": 1, "class": "car", "frame_idx": 11, "time_sec": 1.1},
+            {"track_id": 2, "class": "car", "frame_idx": 12, "time_sec": 1.2},
+            {"track_id": 2, "class": "car", "frame_idx": 13, "time_sec": 1.3},
+        ]
+        per_track = appearance_episodes(tracks, label="car", max_gap_frames=2, min_episode_frames=2, per_track=True)
+        union = appearance_episodes(tracks, label="car", max_gap_frames=2, min_episode_frames=2, per_track=False)
+        self.assertEqual(len(per_track), 2)
+        self.assertEqual(len(union), 1)
+
     def test_pass_through_tracks(self) -> None:
         tracks = [
             {"track_id": 10, "class": "car", "bbox": [0, 40, 10, 50], "frame_idx": 0, "time_sec": 0.0},

@@ -116,17 +116,93 @@ def frames_with_label(
     return {"frames": frame_rows, "intervals": intervals}
 
 
+def _intervals_from_points(
+    points: Sequence[tuple[int, float]],
+    *,
+    max_gap_frames: int,
+) -> list[dict[str, Any]]:
+    intervals: list[dict[str, Any]] = []
+    if not points:
+        return intervals
+    start_frame, start_time = points[0]
+    prev_frame, prev_time = points[0]
+    frame_count = 1
+    max_gap = max(1, int(max_gap_frames))
+    for frame_idx, time_sec in points[1:]:
+        if frame_idx <= prev_frame + max_gap:
+            prev_frame, prev_time = frame_idx, time_sec
+            frame_count += 1
+            continue
+        intervals.append(
+            {
+                "start_frame": start_frame,
+                "end_frame": prev_frame,
+                "start_time": start_time,
+                "end_time": prev_time,
+                "frame_count": frame_count,
+            }
+        )
+        start_frame, start_time = frame_idx, time_sec
+        prev_frame, prev_time = frame_idx, time_sec
+        frame_count = 1
+    intervals.append(
+        {
+            "start_frame": start_frame,
+            "end_frame": prev_frame,
+            "start_time": start_time,
+            "end_time": prev_time,
+            "frame_count": frame_count,
+        }
+    )
+    return intervals
+
+
 def appearance_episodes(
     tracks: Sequence[Mapping[str, Any]],
     *,
     label: str,
     max_gap_frames: int = 2,
     min_episode_frames: int = 1,
+    per_track: bool = True,
 ) -> list[dict[str, Any]]:
-    base = frames_with_label(tracks, label=label, max_gap_frames=max_gap_frames)
     min_frames = max(1, int(min_episode_frames))
     out: list[dict[str, Any]] = []
     target = label.strip().lower()
+
+    if per_track:
+        grouped: dict[Any, list[tuple[int, float]]] = defaultdict(list)
+        for row in tracks:
+            if str(row.get("class", "")).strip().lower() != target:
+                continue
+            track_id = _to_simple_track_id(row.get("track_id"))
+            grouped[track_id].append((int(row.get("frame_idx", 0)), float(row.get("time_sec", 0.0))))
+        for track_id, raw_points in grouped.items():
+            points = sorted(set(raw_points), key=lambda item: item[0])
+            for interval in _intervals_from_points(points, max_gap_frames=max_gap_frames):
+                frame_count = int(interval.get("frame_count", 0))
+                if frame_count < min_frames:
+                    continue
+                out.append(
+                    {
+                        "start_frame": int(interval["start_frame"]),
+                        "end_frame": int(interval["end_frame"]),
+                        "start_time": float(interval["start_time"]),
+                        "end_time": float(interval["end_time"]),
+                        "duration_sec": max(0.0, float(interval["end_time"]) - float(interval["start_time"])),
+                        "frame_count": frame_count,
+                        "track_ids": [track_id],
+                    }
+                )
+        out.sort(
+            key=lambda item: (
+                float(item["start_time"]),
+                float(item["end_time"]),
+                str(item["track_ids"][0]) if item.get("track_ids") else "",
+            )
+        )
+        return out
+
+    base = frames_with_label(tracks, label=label, max_gap_frames=max_gap_frames)
     for interval in base["intervals"]:
         frame_count = int(interval.get("frame_count", 0))
         if frame_count < min_frames:
@@ -277,6 +353,7 @@ def answer_nlq(
     tracks: Sequence[Mapping[str, Any]],
     frame_width: int,
     frame_height: int,
+    per_track_episodes: bool = True,
 ) -> dict[str, Any]:
     q = query.strip().lower()
     label = _infer_label(q)
@@ -285,7 +362,13 @@ def answer_nlq(
 
     if "appear" in q:
         appear_rows = when_object_appears(moments, label=label)
-        episodes = appearance_episodes(tracks, label=label, max_gap_frames=2, min_episode_frames=2)
+        episodes = appearance_episodes(
+            tracks,
+            label=label,
+            max_gap_frames=2,
+            min_episode_frames=2,
+            per_track=per_track_episodes,
+        )
         return {
             "intent": "appear",
             "label": label,

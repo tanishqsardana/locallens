@@ -30,6 +30,22 @@ class MomentClipTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             ClipExportConfig(padding_sec=-1.0).validate()
 
+    def test_build_label_episode_ranges_union_mode(self) -> None:
+        tracks = [
+            {"track_id": 10, "class": "car", "frame_idx": 100, "time_sec": 10.0},
+            {"track_id": 10, "class": "car", "frame_idx": 101, "time_sec": 10.1},
+            {"track_id": 11, "class": "car", "frame_idx": 102, "time_sec": 10.2},
+            {"track_id": 11, "class": "car", "frame_idx": 103, "time_sec": 10.3},
+        ]
+        out = build_label_episode_ranges(
+            tracks,
+            label="car",
+            max_gap_frames=2,
+            min_episode_frames=2,
+            per_track=False,
+        )
+        self.assertEqual(len(out), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
