@@ -146,6 +146,31 @@ class DetectionTrackingConfig:
             raise ValueError("min_detection_confidence must be >= 0")
 
 
+@dataclass(slots=True)
+class GroundingDINOConfig:
+    model_config_path: str
+    model_weights_path: str
+    box_threshold: float = 0.25
+    text_threshold: float = 0.25
+    device: str = "cuda"
+    frame_stride: int = 1
+    max_frames: int = 0
+
+    def validate(self) -> None:
+        if not self.model_config_path.strip():
+            raise ValueError("model_config_path cannot be empty")
+        if not self.model_weights_path.strip():
+            raise ValueError("model_weights_path cannot be empty")
+        if self.box_threshold < 0 or self.box_threshold > 1:
+            raise ValueError("box_threshold must be in [0, 1]")
+        if self.text_threshold < 0 or self.text_threshold > 1:
+            raise ValueError("text_threshold must be in [0, 1]")
+        if self.frame_stride <= 0:
+            raise ValueError("frame_stride must be > 0")
+        if self.max_frames < 0:
+            raise ValueError("max_frames must be >= 0")
+
+
 def _ensure_cv2() -> Any:
     try:
         import cv2  # type: ignore
@@ -733,6 +758,105 @@ def _bbox_iou_xyxy(a: Sequence[float], b: Sequence[float]) -> float:
     if denom <= 0:
         return 0.0
     return float(inter / denom)
+
+
+def build_groundingdino_caption(prompt_terms: Sequence[str]) -> str:
+    clean_terms = [term.strip().lower() for term in prompt_terms if term and term.strip()]
+    if not clean_terms:
+        raise ValueError("GroundingDINO prompt terms cannot be empty")
+    # GroundingDINO commonly works best with phrase separators.
+    return " . ".join(clean_terms) + " ."
+
+
+def generate_groundingdino_detections(
+    sampled_rows: Sequence[Mapping[str, Any]],
+    *,
+    prompt_terms: Sequence[str],
+    config: GroundingDINOConfig,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """
+    Run GroundingDINO on sampled frames to produce frame-level detections.
+    """
+    config.validate()
+    try:
+        from groundingdino.util.inference import load_image, load_model, predict  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "groundingdino is required for --auto-detections-groundingdino. "
+            "Install GroundingDINO in this environment first."
+        ) from exc
+
+    caption = build_groundingdino_caption(prompt_terms)
+    model = load_model(config.model_config_path, config.model_weights_path)
+
+    stride = max(1, int(config.frame_stride))
+    detections: list[dict[str, Any]] = []
+    frames_attempted = 0
+    frames_processed = 0
+    frames_failed = 0
+
+    for idx, row in enumerate(sampled_rows):
+        if idx % stride != 0:
+            continue
+        if config.max_frames > 0 and frames_attempted >= config.max_frames:
+            break
+        frames_attempted += 1
+
+        image_path = row.get("image_path")
+        if not isinstance(image_path, str) or not image_path:
+            frames_failed += 1
+            continue
+
+        frame_idx = int(row.get("frame_idx", 0))
+        time_sec = float(row.get("time_sec", 0.0))
+
+        try:
+            image_source, image = load_image(image_path)
+            boxes, logits, phrases = predict(
+                model=model,
+                image=image,
+                caption=caption,
+                box_threshold=float(config.box_threshold),
+                text_threshold=float(config.text_threshold),
+                device=config.device,
+            )
+            h, w = image_source.shape[:2]
+            for box, logit, phrase in zip(boxes, logits, phrases):
+                cx, cy, bw, bh = [float(v) for v in box.tolist()]
+                x1 = max(0.0, (cx - bw / 2.0) * w)
+                y1 = max(0.0, (cy - bh / 2.0) * h)
+                x2 = min(float(w), (cx + bw / 2.0) * w)
+                y2 = min(float(h), (cy + bh / 2.0) * h)
+                label = str(phrase).split("(", 1)[0].strip().lower()
+                if not label:
+                    continue
+                detections.append(
+                    {
+                        "class": label,
+                        "bbox": [x1, y1, x2, y2],
+                        "confidence": float(logit.item() if hasattr(logit, "item") else logit),
+                        "frame_idx": frame_idx,
+                        "time_sec": time_sec,
+                    }
+                )
+            frames_processed += 1
+        except Exception:
+            frames_failed += 1
+
+    detections.sort(key=lambda item: (int(item["frame_idx"]), float(item["time_sec"]), str(item["class"])))
+    class_counts = Counter(str(item["class"]) for item in detections)
+    report = {
+        "status": "generated",
+        "frames_attempted": frames_attempted,
+        "frames_processed": frames_processed,
+        "frames_failed": frames_failed,
+        "detection_row_count": len(detections),
+        "class_row_counts": dict(sorted(class_counts.items(), key=lambda kv: kv[0])),
+        "prompt_terms": list(prompt_terms),
+        "caption": caption,
+        "config": asdict(config),
+    }
+    return detections, report
 
 
 def normalize_detection_rows(
@@ -1388,6 +1512,7 @@ def build_phase_outputs(
     prompt_terms: Sequence[str],
     phase2_status: str,
     track_source: str = "tracks_json",
+    detection_generation_report: Mapping[str, Any] | None = None,
     tracked_rows: Sequence[Mapping[str, Any]] | None = None,
     detection_tracking_report: Mapping[str, Any] | None = None,
     canonicalized_tracks: Sequence[Mapping[str, Any]] | None = None,
@@ -1436,6 +1561,7 @@ def build_phase_outputs(
             "canonicalized_track_row_count": len(canonicalized_tracks or []),
             "processed_track_row_count": len(normalized_tracks),
             "normalized_track_row_count": len(normalized_tracks),
+            "detection_generation": dict(detection_generation_report or {}),
             "detection_tracking": dict(detection_tracking_report or {}),
             "track_processing": dict(track_processing_report or {}),
             "rows": _slice_for_report(
@@ -1485,6 +1611,8 @@ def run_video_cycle(
     output_dir: str | Path,
     *,
     detections_path: str | Path | None = None,
+    groundingdino_config: GroundingDINOConfig | None = None,
+    detections_output_path: str | Path | None = None,
     detection_tracking_config: DetectionTrackingConfig | None = None,
     tracked_rows_output_path: str | Path | None = None,
     captions_path: str | Path | None = None,
@@ -1606,18 +1734,54 @@ def run_video_cycle(
             encoding="utf-8",
         )
 
-    if tracks_path and detections_path:
-        raise ValueError("Provide either tracks_path or detections_path, not both")
-    if not tracks_path and not detections_path:
-        raise ValueError("One of tracks_path or detections_path is required")
+    input_count = int(bool(tracks_path)) + int(bool(detections_path)) + int(bool(groundingdino_config))
+    if input_count != 1:
+        raise ValueError("Provide exactly one of tracks_path, detections_path, or groundingdino_config")
 
     rows: list[dict[str, Any]]
     track_source = "tracks_json"
     tracked_rows: list[dict[str, Any]] | None = None
     detection_tracking_report: dict[str, Any] | None = None
+    detection_generation_report: dict[str, Any] | None = None
 
     allowed_labels = set(prompts) if prompts else None
-    if detections_path:
+    if groundingdino_config:
+        track_source = "groundingdino_iou_tracker"
+        generation_terms = prompts or list(seed_labels or [])
+        if not generation_terms:
+            generation_terms = ["car", "truck", "person"]
+        generated_detections, detection_generation_report = generate_groundingdino_detections(
+            sampled_rows=sampled_rows,
+            prompt_terms=generation_terms,
+            config=groundingdino_config,
+        )
+        effective_detections_path = detections_output_path or (out_dir / "groundingdino_detections_generated.json")
+        detections_file = Path(effective_detections_path)
+        detections_file.parent.mkdir(parents=True, exist_ok=True)
+        detections_file.write_text(
+            json.dumps(generated_detections, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        normalized_detections = normalize_detection_rows(
+            generated_detections,
+            synonym_map=synonym_map,
+            allowed_labels=allowed_labels,
+        )
+        effective_tracking_config = detection_tracking_config or DetectionTrackingConfig()
+        tracked_rows, detection_tracking_report = track_detections(
+            normalized_detections,
+            config=effective_tracking_config,
+            fps=manifest.fps,
+        )
+        effective_tracked_path = tracked_rows_output_path or (out_dir / "tracked_rows.json")
+        tracked_rows_file = Path(effective_tracked_path)
+        tracked_rows_file.parent.mkdir(parents=True, exist_ok=True)
+        tracked_rows_file.write_text(
+            json.dumps(tracked_rows, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        rows = tracked_rows
+    elif detections_path:
         track_source = "detections_iou_tracker"
         detection_rows = load_json_rows(detections_path)
         normalized_detections = normalize_detection_rows(
@@ -1702,6 +1866,7 @@ def run_video_cycle(
         raw_tracks=rows,
         tracked_rows=tracked_rows,
         track_source=track_source,
+        detection_generation_report=detection_generation_report,
         detection_tracking_report=detection_tracking_report,
         normalized_tracks=normalized,
         canonicalized_tracks=canonicalized_tracks,
@@ -1729,6 +1894,13 @@ def run_video_cycle(
 
     summary = {
         "video_manifest": str(out_dir / "ingest" / "video_manifest.json"),
+        "detections": (
+            str(detections_output_path or (out_dir / "groundingdino_detections_generated.json"))
+            if groundingdino_config
+            else str(detections_path)
+            if detections_path
+            else None
+        ),
         "normalized_tracks": str(normalized_path),
         "moments": str(moments_path),
         "keyframes": str(out_dir / "moment_keyframes.json"),

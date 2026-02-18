@@ -262,6 +262,10 @@ def _render_cycle_inspector() -> None:
         st.write(f"Canonicalized rows: `{p3.get('canonicalized_track_row_count', p3.get('normalized_track_row_count', 0))}`")
         st.write(f"Processed rows: `{p3.get('processed_track_row_count', p3.get('normalized_track_row_count', 0))}`")
         detection_tracking = p3.get("detection_tracking", {})
+        detection_generation = p3.get("detection_generation", {})
+        if isinstance(detection_generation, dict) and detection_generation:
+            st.write("Detection generation report:")
+            st.json(detection_generation)
         if isinstance(detection_tracking, dict) and detection_tracking:
             st.write("Detection tracking report:")
             st.json(detection_tracking)

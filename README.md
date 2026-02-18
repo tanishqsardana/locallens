@@ -163,6 +163,24 @@ PYTHONPATH=src python -m videosearch.video_cycle_cli \
   --show-phase-outputs
 ```
 
+Run GroundingDINO detections + tracking in one pipeline command:
+
+```bash
+PYTHONPATH=src python -m videosearch.video_cycle_cli \
+  --video /path/to/video.mp4 \
+  --auto-detections-groundingdino \
+  --groundingdino-config-path /path/to/GroundingDINO_SwinT_OGC.py \
+  --groundingdino-weights-path /path/to/groundingdino_swint_ogc.pth \
+  --out-dir data/video_cycle_run \
+  --auto-captions \
+  --vlm-endpoint http://localhost:8000/v1/chat/completions \
+  --vlm-model nvidia/Qwen2.5-VL-7B-Instruct-NVFP4 \
+  --llm-postprocess-vocab \
+  --detect-track-iou-threshold 0.3 \
+  --detect-track-max-missed-frames 10 \
+  --show-phase-outputs
+```
+
 Phase 3 track processing controls:
 - `--track-min-confidence` (drop low-confidence rows)
 - `--track-min-length` (drop short tracks)
@@ -204,6 +222,7 @@ Pipeline artifacts:
 - `data/video_cycle_run/vlm_captions_generated.json` (if `--auto-captions` is used)
 - `data/video_cycle_run/vocab_postprocess.json` (if `--llm-postprocess-vocab` is used)
 - `data/video_cycle_run/tracked_rows.json` (if `--detections` is used)
+- `data/video_cycle_run/groundingdino_detections_generated.json` (if `--auto-detections-groundingdino` is used)
 - `data/video_cycle_run/normalized_tracks.json`
 - `data/video_cycle_run/tracks_report.json`
 - `data/video_cycle_run/moments.json`
@@ -233,7 +252,7 @@ Each row must contain equivalents of:
 - `frame_idx` (or `frame` / `frame_id`)
 - `time_sec` (or `timestamp` / `time`)
 
-`--tracks`, `--bytetrack-txt`, and `--detections` are mutually exclusive.
+`--tracks`, `--bytetrack-txt`, `--detections`, and `--auto-detections-groundingdino` are mutually exclusive.
 Provide exactly one.
 `--captions` and `--auto-captions` are mutually exclusive.
 

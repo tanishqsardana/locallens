@@ -10,6 +10,7 @@ from videosearch.video_cycle import (
     VideoManifest,
     build_phase_outputs,
     build_keyframe_targets,
+    build_groundingdino_caption,
     build_prompt_terms,
     build_vocab_postprocess_prompt,
     convert_bytetrack_mot_rows,
@@ -54,6 +55,10 @@ class VideoCycleHelpersTest(unittest.TestCase):
         self.assertIn("Seed labels", prompt)
         self.assertIn("Current prompt terms", prompt)
         self.assertIn("12", prompt)
+
+    def test_build_groundingdino_caption(self) -> None:
+        caption = build_groundingdino_caption(["car", " truck ", "person"])
+        self.assertEqual(caption, "car . truck . person .")
 
     def test_normalize_tracking_rows_with_flexible_keys(self) -> None:
         rows = [

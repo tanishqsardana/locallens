@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .video_cycle import (
     DetectionTrackingConfig,
+    GroundingDINOConfig,
     LLMVocabPostprocessConfig,
     TrackProcessingConfig,
     VLMCaptionConfig,
@@ -41,6 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Frame-level detections JSON path (class,bbox,confidence,frame_idx,time_sec). "
         "If provided, tracking is run in-pipeline.",
     )
+    parser.add_argument(
+        "--auto-detections-groundingdino",
+        action="store_true",
+        help="Run GroundingDINO on sampled frames inside pipeline and use those detections for tracking.",
+    )
+    parser.add_argument("--groundingdino-config-path", default=None, help="GroundingDINO model config file path")
+    parser.add_argument("--groundingdino-weights-path", default=None, help="GroundingDINO model weights file path")
+    parser.add_argument("--groundingdino-box-threshold", type=float, default=0.25)
+    parser.add_argument("--groundingdino-text-threshold", type=float, default=0.25)
+    parser.add_argument("--groundingdino-device", default="cuda")
+    parser.add_argument("--groundingdino-frame-stride", type=int, default=1)
+    parser.add_argument("--groundingdino-max-frames", type=int, default=0)
     parser.add_argument(
         "--bytetrack-class",
         default="car",
@@ -155,15 +168,23 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.captions and args.auto_captions:
         raise ValueError("Use either --captions or --auto-captions, not both")
-    input_count = int(bool(args.tracks)) + int(bool(args.bytetrack_txt)) + int(bool(args.detections))
+    input_count = (
+        int(bool(args.tracks))
+        + int(bool(args.bytetrack_txt))
+        + int(bool(args.detections))
+        + int(bool(args.auto_detections_groundingdino))
+    )
     if input_count != 1:
-        raise ValueError("Provide exactly one of --tracks, --bytetrack-txt, or --detections")
+        raise ValueError(
+            "Provide exactly one of --tracks, --bytetrack-txt, --detections, or --auto-detections-groundingdino"
+        )
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tracks_path: str | None = None
     detections_path: str | None = None
+    groundingdino_config: GroundingDINOConfig | None = None
     if args.tracks:
         tracks_path = args.tracks
     elif args.bytetrack_txt:
@@ -181,6 +202,21 @@ def main() -> int:
         tracks_path = str(converted_path)
     elif args.detections:
         detections_path = args.detections
+    elif args.auto_detections_groundingdino:
+        if not args.groundingdino_config_path or not args.groundingdino_weights_path:
+            raise ValueError(
+                "--auto-detections-groundingdino requires --groundingdino-config-path and --groundingdino-weights-path"
+            )
+        groundingdino_config = GroundingDINOConfig(
+            model_config_path=str(args.groundingdino_config_path),
+            model_weights_path=str(args.groundingdino_weights_path),
+            box_threshold=float(args.groundingdino_box_threshold),
+            text_threshold=float(args.groundingdino_text_threshold),
+            device=str(args.groundingdino_device),
+            frame_stride=int(args.groundingdino_frame_stride),
+            max_frames=int(args.groundingdino_max_frames),
+        )
+        groundingdino_config.validate()
     else:
         raise ValueError("Provide exactly one input source")
 
@@ -231,6 +267,7 @@ def main() -> int:
         video_path=args.video,
         tracks_path=tracks_path,
         detections_path=detections_path,
+        groundingdino_config=groundingdino_config,
         output_dir=out_dir,
         detection_tracking_config=detection_tracking_config if detections_path else None,
         captions_path=args.captions,
