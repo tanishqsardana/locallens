@@ -311,8 +311,10 @@ Returned moments:
 - `STOP`
 - `NEAR`
 - `APPROACH`
+- `TRAFFIC_CHANGE`
 
 `DISAPPEAR` is emitted as a point event once missing-frame threshold is reached.
+`APPEAR` continuity tolerates short frame gaps (useful when ingest FPS is lower than source FPS).
 
 All distances are normalized by frame diagonal. Speed uses EMA smoothing.
 Overlapping/adjacent moments with gap `< 1s` are merged.

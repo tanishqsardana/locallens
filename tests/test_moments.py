@@ -64,6 +64,51 @@ class MomentGenerationTest(unittest.TestCase):
         self.assertGreaterEqual(disappear[0].start_time, 1.3)
         self.assertAlmostEqual(disappear[0].end_time, disappear[0].start_time, places=3)
 
+    def test_appear_with_sampled_frame_gaps(self) -> None:
+        observations: list[TrackObservation] = []
+        for frame in range(0, 26, 2):
+            observations.append(_obs(99, "car", frame, 5, 5))
+        for frame in [0, 2, 4, 6, 8]:
+            observations.append(_obs(1, "car", frame, 20 + frame, 40))
+
+        config = MomentConfig(
+            appear_persist_frames=5,
+            continuity_max_gap_frames=3,
+            disappear_missing_frames=50,
+            disappear_min_visible_frames=2,
+            stop_enter_frames=4,
+            stop_exit_frames=4,
+            near_enter_frames=3,
+            near_exit_frames=3,
+            approach_window=8,
+            approach_reverse_frames=8,
+        )
+        moments = generate_moments(observations, frame_width=100, frame_height=100, config=config)
+        appear = [m for m in moments if m.type == "APPEAR" and m.entities == [1]]
+        self.assertEqual(len(appear), 1)
+
+    def test_disappear_requires_min_visible_frames(self) -> None:
+        observations: list[TrackObservation] = []
+        for frame in range(0, 20):
+            observations.append(_obs(99, "car", frame, 10, 10))
+        for frame in [0, 1]:
+            observations.append(_obs(2, "car", frame, 30 + frame, 10))
+
+        config = MomentConfig(
+            appear_persist_frames=2,
+            disappear_missing_frames=4,
+            disappear_min_visible_frames=5,
+            stop_enter_frames=4,
+            stop_exit_frames=4,
+            near_enter_frames=3,
+            near_exit_frames=3,
+            approach_window=8,
+            approach_reverse_frames=8,
+        )
+        moments = generate_moments(observations, frame_width=100, frame_height=100, config=config)
+        disappear = [m for m in moments if m.type == "DISAPPEAR" and m.entities == [2]]
+        self.assertEqual(disappear, [])
+
     def test_stop_event_from_speed_transition(self) -> None:
         observations: list[TrackObservation] = []
         # Anchor track.
@@ -156,6 +201,36 @@ class MomentGenerationTest(unittest.TestCase):
         self.assertEqual(len(approach), 1)
         self.assertLess(approach[0].start_time, approach[0].end_time)
         self.assertGreater(approach[0].metadata.get("distance_drop", 0.0), 0.08)
+
+    def test_traffic_change_event_from_object_count_shift(self) -> None:
+        observations: list[TrackObservation] = []
+        for frame in range(0, 10):
+            observations.append(_obs(1, "car", frame, 20, 40))
+        for frame in range(10, 20):
+            observations.append(_obs(1, "car", frame, 20, 40))
+            observations.append(_obs(2, "car", frame, 30, 40))
+            observations.append(_obs(3, "car", frame, 40, 40))
+            observations.append(_obs(4, "car", frame, 50, 40))
+        for frame in range(20, 30):
+            observations.append(_obs(1, "car", frame, 20, 40))
+
+        config = MomentConfig(
+            appear_persist_frames=2,
+            disappear_missing_frames=100,
+            stop_enter_frames=8,
+            stop_exit_frames=8,
+            near_enter_frames=3,
+            near_exit_frames=3,
+            approach_window=8,
+            approach_reverse_frames=8,
+            emit_traffic_change=True,
+            traffic_change_window_frames=5,
+            traffic_change_threshold=2,
+            traffic_change_cooldown_frames=4,
+        )
+        moments = generate_moments(observations, frame_width=100, frame_height=100, config=config)
+        traffic = [m for m in moments if m.type == "TRAFFIC_CHANGE"]
+        self.assertGreaterEqual(len(traffic), 1)
 
 
 if __name__ == "__main__":

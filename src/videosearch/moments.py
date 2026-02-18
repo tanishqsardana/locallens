@@ -58,6 +58,8 @@ class Moment:
 class MomentConfig:
     appear_persist_frames: int = 5
     disappear_missing_frames: int = 10
+    disappear_min_visible_frames: int = 5
+    continuity_max_gap_frames: int = 3
     stop_enter_frames: int = 8
     stop_exit_frames: int = 8
     near_enter_frames: int = 8
@@ -71,6 +73,18 @@ class MomentConfig:
     approach_drop_threshold: float = 0.04
     speed_ema_alpha: float = 0.4
     merge_gap_sec: float = 1.0
+    emit_traffic_change: bool = True
+    traffic_change_window_frames: int = 12
+    traffic_change_threshold: int = 3
+    traffic_change_cooldown_frames: int = 20
+    traffic_change_labels: tuple[str, ...] = (
+        "car",
+        "truck",
+        "bus",
+        "van",
+        "person",
+        "motorcycle",
+    )
     relevant_class_pairs: tuple[tuple[str, str], ...] = (
         ("person", "car"),
         ("person", "truck"),
@@ -81,15 +95,21 @@ class MomentConfig:
         int_fields = (
             self.appear_persist_frames,
             self.disappear_missing_frames,
+            self.disappear_min_visible_frames,
+            self.continuity_max_gap_frames,
             self.stop_enter_frames,
             self.stop_exit_frames,
             self.near_enter_frames,
             self.near_exit_frames,
             self.approach_window,
             self.approach_reverse_frames,
+            self.traffic_change_window_frames,
+            self.traffic_change_threshold,
         )
         if any(value <= 0 for value in int_fields):
             raise ValueError("Frame-count thresholds must be > 0")
+        if self.traffic_change_cooldown_frames < 0:
+            raise ValueError("traffic_change_cooldown_frames must be >= 0")
         if self.near_threshold_exit <= self.near_threshold:
             raise ValueError("near_threshold_exit must be larger than near_threshold")
         if not (0.0 < self.speed_ema_alpha <= 1.0):
@@ -103,6 +123,10 @@ class MomentConfig:
     def normalized_pairs(self) -> set[tuple[str, str]]:
         return {tuple(sorted(pair)) for pair in self.relevant_class_pairs}
 
+    @property
+    def traffic_change_label_set(self) -> set[str]:
+        return {str(label).strip().lower() for label in self.traffic_change_labels if str(label).strip()}
+
 
 @dataclass(slots=True)
 class _TrackState:
@@ -113,6 +137,7 @@ class _TrackState:
     last_seen_frame: int
     last_seen_time: float
     seen_run: int = 1
+    total_seen_frames: int = 1
     appear_emitted: bool = False
     missing_count: int = 0
     prev_center: tuple[float, float] | None = None
@@ -179,6 +204,9 @@ class MomentGenerator:
         tracks: dict[TrackId, _TrackState] = {}
         pair_states: dict[tuple[TrackId, TrackId], _PairState] = {}
         allowed_pairs = self.config.normalized_pairs
+        traffic_labels = self.config.traffic_change_label_set
+        traffic_history: deque[tuple[int, float, int]] = deque(maxlen=self.config.traffic_change_window_frames)
+        last_traffic_change_frame = first_frame - self.config.traffic_change_cooldown_frames - 1
 
         for frame_idx in range(first_frame, last_frame + 1):
             current_time = frame_times[frame_idx]
@@ -205,8 +233,9 @@ class MomentGenerator:
                     prev_frame = state.last_seen_frame
                     prev_time = state.last_seen_time
                     prev_center = state.prev_center
+                    frame_gap = frame_idx - prev_frame
 
-                    if frame_idx == prev_frame + 1:
+                    if 1 <= frame_gap <= self.config.continuity_max_gap_frames:
                         state.seen_run += 1
                     else:
                         if state.active_stop_start is not None:
@@ -234,10 +263,15 @@ class MomentGenerator:
                         state.above_start_time = None
 
                     state.missing_count = 0
+                    state.total_seen_frames += 1
                     state.label = obs.label
                     state.label_group = group
 
-                    if frame_idx == prev_frame + 1 and prev_center is not None and current_time > prev_time:
+                    if (
+                        1 <= frame_gap <= self.config.continuity_max_gap_frames
+                        and prev_center is not None
+                        and current_time > prev_time
+                    ):
                         raw_speed = (
                             _center_distance(center, prev_center)
                             / diag
@@ -286,7 +320,6 @@ class MomentGenerator:
                 if track_id in visible_ids:
                     continue
                 state.missing_count += 1
-                state.seen_run = 0
                 if state.active_stop_start is not None and state.missing_count == 1:
                     _append_moment(
                         moments,
@@ -307,17 +340,52 @@ class MomentGenerator:
                     state.above_count = 0
                     state.above_start_time = None
                 if state.missing_count == self.config.disappear_missing_frames:
-                    _append_moment(
-                        moments,
-                        "DISAPPEAR",
-                        current_time,
-                        current_time,
-                        [track_id],
-                        {
-                            "label": state.label,
-                            "label_group": state.label_group,
-                        },
-                    )
+                    if state.total_seen_frames >= self.config.disappear_min_visible_frames:
+                        _append_moment(
+                            moments,
+                            "DISAPPEAR",
+                            current_time,
+                            current_time,
+                            [track_id],
+                            {
+                                "label": state.label,
+                                "label_group": state.label_group,
+                            },
+                        )
+
+            if self.config.emit_traffic_change:
+                dynamic_visible_count = sum(
+                    1
+                    for track_id in visible_ids
+                    if tracks.get(track_id) is not None and tracks[track_id].label_group in traffic_labels
+                )
+                traffic_history.append((frame_idx, current_time, dynamic_visible_count))
+                if len(traffic_history) == self.config.traffic_change_window_frames:
+                    first_frame_idx, first_time, first_count = traffic_history[0]
+                    _, last_time, last_count = traffic_history[-1]
+                    delta = int(last_count - first_count)
+                    if (
+                        abs(delta) >= self.config.traffic_change_threshold
+                        and (frame_idx - last_traffic_change_frame) >= self.config.traffic_change_cooldown_frames
+                    ):
+                        direction = "increase" if delta > 0 else "decrease"
+                        _append_moment(
+                            moments,
+                            "TRAFFIC_CHANGE",
+                            float(first_time),
+                            float(last_time),
+                            [],
+                            {
+                                "from_count": int(first_count),
+                                "to_count": int(last_count),
+                                "delta": delta,
+                                "direction": direction,
+                                "window_frames": self.config.traffic_change_window_frames,
+                                "start_frame": int(first_frame_idx),
+                                "end_frame": int(frame_idx),
+                            },
+                        )
+                        last_traffic_change_frame = frame_idx
 
             # Pair-level updates.
             seen_pairs: set[tuple[TrackId, TrackId]] = set()
