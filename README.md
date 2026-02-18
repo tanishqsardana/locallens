@@ -332,6 +332,10 @@ PYTHONPATH=src python -m videosearch.moment_query_cli appear \
   --label truck
 ```
 
+`appear` now returns:
+- `appear_events` (raw APPEAR moments per track)
+- `episodes` (merged presence windows from frame ranges)
+
 ```bash
 PYTHONPATH=src python -m videosearch.moment_query_cli frames-with \
   --run-dir data/video_cycle_run \

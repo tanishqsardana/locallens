@@ -5,6 +5,7 @@ import unittest
 from videosearch.moment_query import (
     PassThroughConfig,
     answer_nlq,
+    appearance_episodes,
     frames_with_label,
     pass_through_tracks,
     when_object_appears,
@@ -46,6 +47,18 @@ class MomentQueryTest(unittest.TestCase):
         out = frames_with_label(tracks, label="truck", max_gap_frames=2)
         self.assertEqual(len(out["frames"]), 3)
         self.assertGreaterEqual(len(out["intervals"]), 2)
+
+    def test_appearance_episodes(self) -> None:
+        tracks = [
+            {"track_id": 1, "class": "truck", "frame_idx": 10, "time_sec": 1.0},
+            {"track_id": 1, "class": "truck", "frame_idx": 11, "time_sec": 1.1},
+            {"track_id": 2, "class": "truck", "frame_idx": 20, "time_sec": 2.0},
+            {"track_id": 2, "class": "truck", "frame_idx": 21, "time_sec": 2.1},
+        ]
+        out = appearance_episodes(tracks, label="truck", max_gap_frames=2, min_episode_frames=2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["start_frame"], 10)
+        self.assertEqual(out[1]["start_frame"], 20)
 
     def test_pass_through_tracks(self) -> None:
         tracks = [
@@ -95,6 +108,7 @@ class MomentQueryTest(unittest.TestCase):
         )
         self.assertEqual(out["intent"], "appear")
         self.assertEqual(len(out["results"]), 1)
+        self.assertIn("episodes", out)
 
 
 if __name__ == "__main__":

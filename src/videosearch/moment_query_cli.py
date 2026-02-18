@@ -7,6 +7,7 @@ from pathlib import Path
 from .moment_query import (
     PassThroughConfig,
     answer_nlq,
+    appearance_episodes,
     frames_with_label,
     load_rows,
     pass_through_tracks,
@@ -31,6 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
     appear = sub.add_parser("appear", help="When does a label appear?")
     appear.add_argument("--label", required=True)
     appear.add_argument("--moments", default=None)
+    appear.add_argument("--tracks", default=None)
+    appear.add_argument("--max-gap-frames", type=int, default=2)
+    appear.add_argument("--min-episode-frames", type=int, default=2)
 
     frames = sub.add_parser("frames-with", help="Which frames contain a label?")
     frames.add_argument("--label", required=True)
@@ -63,7 +67,17 @@ def main() -> int:
 
     if args.command == "appear":
         moments = load_rows(_resolve(run_dir, args.moments, "moments.json"))
-        payload = when_object_appears(moments, label=args.label)
+        tracks = load_rows(_resolve(run_dir, args.tracks, "normalized_tracks.json"))
+        payload = {
+            "label": args.label.strip().lower(),
+            "appear_events": when_object_appears(moments, label=args.label),
+            "episodes": appearance_episodes(
+                tracks,
+                label=args.label,
+                max_gap_frames=int(args.max_gap_frames),
+                min_episode_frames=int(args.min_episode_frames),
+            ),
+        }
         print(json.dumps(payload, indent=2, ensure_ascii=True))
         return 0
 

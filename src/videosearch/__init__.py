@@ -6,6 +6,7 @@ from .moments import Moment, MomentConfig, MomentGenerator, TrackObservation, ge
 from .moment_query import (
     PassThroughConfig,
     answer_nlq,
+    appearance_episodes,
     frames_with_label,
     pass_through_tracks,
     when_object_appears,
@@ -86,6 +87,7 @@ __all__ = [
     "render_moment_overlay_video",
     "run_video_cycle",
     "answer_nlq",
+    "appearance_episodes",
     "when_object_appears",
     "track_detections",
     "video_fps",

@@ -116,6 +116,55 @@ def frames_with_label(
     return {"frames": frame_rows, "intervals": intervals}
 
 
+def appearance_episodes(
+    tracks: Sequence[Mapping[str, Any]],
+    *,
+    label: str,
+    max_gap_frames: int = 2,
+    min_episode_frames: int = 1,
+) -> list[dict[str, Any]]:
+    base = frames_with_label(tracks, label=label, max_gap_frames=max_gap_frames)
+    min_frames = max(1, int(min_episode_frames))
+    out: list[dict[str, Any]] = []
+    target = label.strip().lower()
+    for interval in base["intervals"]:
+        frame_count = int(interval.get("frame_count", 0))
+        if frame_count < min_frames:
+            continue
+        start_frame = int(interval["start_frame"])
+        end_frame = int(interval["end_frame"])
+        track_ids: set[Any] = set()
+        for row in tracks:
+            if str(row.get("class", "")).strip().lower() != target:
+                continue
+            frame_idx = int(row.get("frame_idx", 0))
+            if start_frame <= frame_idx <= end_frame:
+                track_ids.add(_to_simple_track_id(row.get("track_id")))
+        out.append(
+            {
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "start_time": float(interval["start_time"]),
+                "end_time": float(interval["end_time"]),
+                "duration_sec": max(0.0, float(interval["end_time"]) - float(interval["start_time"])),
+                "frame_count": frame_count,
+                "track_ids": sorted(track_ids, key=str),
+            }
+        )
+    return out
+
+
+def _to_simple_track_id(value: Any) -> Any:
+    try:
+        if isinstance(value, str) and value.strip():
+            return int(value)
+        if isinstance(value, (int, float)):
+            return int(value)
+    except Exception:
+        return value
+    return value
+
+
 @dataclass(slots=True)
 class PassThroughConfig:
     min_track_frames: int = 5
@@ -235,10 +284,13 @@ def answer_nlq(
         return {"intent": "unknown", "error": "Could not infer label from query"}
 
     if "appear" in q:
+        appear_rows = when_object_appears(moments, label=label)
+        episodes = appearance_episodes(tracks, label=label, max_gap_frames=2, min_episode_frames=2)
         return {
             "intent": "appear",
             "label": label,
-            "results": when_object_appears(moments, label=label),
+            "results": appear_rows,
+            "episodes": episodes,
         }
     if "pass" in q or "through" in q:
         return {
