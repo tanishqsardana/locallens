@@ -1466,6 +1466,9 @@ def extract_keyframes(
     video_path: str | Path,
     targets: Sequence[Mapping[str, Any]],
     output_dir: str | Path,
+    *,
+    log_progress: bool = False,
+    progress_every: int = 100,
 ) -> list[KeyframeRecord]:
     cv2 = _ensure_cv2()
     video = Path(video_path)
@@ -1476,19 +1479,34 @@ def extract_keyframes(
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video}")
 
+    total_requested = 0
+    for target in targets:
+        frames = target.get("frames", [])
+        if isinstance(frames, list):
+            total_requested += len(frames)
+
+    _log_progress(log_progress, f"Phase 5 keyframe extraction start: requested_frames={total_requested}")
+
     records: list[KeyframeRecord] = []
+    failed_reads = 0
+    processed = 0
+    log_step = max(1, int(progress_every))
     for target in targets:
         moment_index = int(target["moment_index"])
         frames = target.get("frames", [])
         if not isinstance(frames, list):
             continue
         for row in frames:
+            processed += 1
+            if processed == 1 or processed % log_step == 0 or processed == total_requested:
+                _log_progress(log_progress, f"Phase 5 progress: {processed}/{total_requested} frame reads")
             frame_idx = int(row["frame_idx"])
             role = str(row["role"])
             time_sec = float(row["time_sec"])
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ok, frame = cap.read()
             if not ok:
+                failed_reads += 1
                 continue
             path = out_dir / f"moment_{moment_index:05d}_{role}.jpg"
             cv2.imwrite(str(path), frame)
@@ -1502,6 +1520,10 @@ def extract_keyframes(
                 )
             )
     cap.release()
+    _log_progress(
+        log_progress,
+        f"Phase 5 keyframe extraction done: extracted={len(records)}, failed_reads={failed_reads}",
+    )
     return records
 
 
@@ -1528,9 +1550,16 @@ def _histogram_image_embedding(image_path: str | Path, bins: int = 16) -> np.nda
 def build_moment_embeddings(
     keyframes: Sequence[KeyframeRecord],
     model_name: str = "histogram-rgb-16",
+    *,
+    log_progress: bool = False,
+    progress_every: int = 100,
 ) -> tuple[dict[int, np.ndarray], str]:
+    _log_progress(log_progress, f"Phase 6 embedding start: keyframes={len(keyframes)}")
     grouped: dict[int, list[np.ndarray]] = {}
-    for record in keyframes:
+    log_step = max(1, int(progress_every))
+    for idx, record in enumerate(keyframes, start=1):
+        if idx == 1 or idx % log_step == 0 or idx == len(keyframes):
+            _log_progress(log_progress, f"Phase 6 progress: {idx}/{len(keyframes)} keyframes embedded")
         vector = _histogram_image_embedding(record.image_path)
         grouped.setdefault(record.moment_index, []).append(vector)
 
@@ -1542,6 +1571,7 @@ def build_moment_embeddings(
         if norm > 0:
             mean = mean / norm
         pooled[moment_index] = mean.astype(np.float32)
+    _log_progress(log_progress, f"Phase 6 embedding done: moments_embedded={len(pooled)}")
     return pooled, model_name
 
 
@@ -2104,14 +2134,19 @@ def run_video_cycle(
     moments_path.write_text(json.dumps(moment_rows, indent=2, ensure_ascii=True), encoding="utf-8")
 
     targets = build_keyframe_targets(moment_rows, fps=manifest.fps, frame_count=max(manifest.frame_count, 1))
-    keyframes = extract_keyframes(video_path=video_path, targets=targets, output_dir=out_dir / "moment_keyframes")
+    keyframes = extract_keyframes(
+        video_path=video_path,
+        targets=targets,
+        output_dir=out_dir / "moment_keyframes",
+        log_progress=log_progress,
+    )
     keyframe_payload = [asdict(record) for record in keyframes]
     (out_dir / "moment_keyframes.json").write_text(
         json.dumps(keyframe_payload, indent=2, ensure_ascii=True),
         encoding="utf-8",
     )
 
-    embeddings, model_name = build_moment_embeddings(keyframes)
+    embeddings, model_name = build_moment_embeddings(keyframes, log_progress=log_progress)
     _log_progress(log_progress, f"Phase 5/6 keyframes+embeddings done: keyframes={len(keyframes)}, embeddings={len(embeddings)}")
     db_path = out_dir / "moment_index.sqlite"
     persist_moment_index(
