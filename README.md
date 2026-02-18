@@ -125,6 +125,10 @@ The app supports:
 - Interactive threshold tuning for APPEAR/DISAPPEAR/STOP/NEAR/APPROACH
 - Exporting generated moments as JSON
 
+The app now has two views in the sidebar:
+- `Cycle Inspector`: load and inspect `phase_outputs.json` with phase tabs and keyframe previews
+- `Moment Lab`: run moment generation directly from tracking rows
+
 ## Full Video Cycle (Video -> Moments -> Keyframes -> Index)
 
 Install video dependencies:

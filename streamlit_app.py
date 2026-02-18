@@ -10,6 +10,7 @@ from videosearch.moments import Moment, MomentConfig, TrackObservation, generate
 
 
 SAMPLE_FILE = Path("examples/tracks/sample_static_scene.json")
+DEFAULT_PHASE_OUTPUTS = Path("data/video_cycle_run/phase_outputs.json")
 
 
 def _load_sample() -> dict[str, Any]:
@@ -135,8 +136,160 @@ def _moment_rows(moments: list[Moment]) -> list[dict[str, Any]]:
     return rows
 
 
-def main() -> None:
-    st.set_page_config(page_title="Moment Generator Lab", layout="wide")
+def _safe_json_read(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(payload, dict):
+        if "phase_outputs" in payload and isinstance(payload["phase_outputs"], dict):
+            return payload["phase_outputs"]
+        return payload
+    return None
+
+
+def _as_rows(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        out: list[dict[str, Any]] = []
+        for item in value:
+            if isinstance(item, dict):
+                out.append(item)
+        return out
+    return []
+
+
+def _render_image_grid(rows: list[dict[str, Any]], limit: int = 12) -> None:
+    images: list[tuple[str, str]] = []
+    for row in rows:
+        image_path = row.get("image_path")
+        if isinstance(image_path, str):
+            path = Path(image_path)
+            if path.exists():
+                caption = f"frame={row.get('frame_idx', '?')} t={row.get('time_sec', '?')}"
+                images.append((str(path), caption))
+    if not images:
+        st.info("No preview images found on disk for these rows.")
+        return
+
+    show = images[:limit]
+    cols = st.columns(3)
+    for idx, (img_path, caption) in enumerate(show):
+        with cols[idx % 3]:
+            st.image(img_path, caption=caption, use_container_width=True)
+
+
+def _render_cycle_inspector() -> None:
+    st.title("Video Cycle Inspector")
+    st.caption("Inspect end-to-end pipeline phases from `phase_outputs.json`.")
+
+    default_path = str(DEFAULT_PHASE_OUTPUTS)
+    phase_path_str = st.text_input("phase_outputs.json path", value=default_path)
+    phase_path = Path(phase_path_str)
+    payload = _safe_json_read(phase_path)
+
+    if payload is None:
+        st.warning("Could not load phase outputs. Run the CLI first, then point this to `phase_outputs.json`.")
+        st.code(
+            "PYTHONPATH=src python -m videosearch.video_cycle_cli --video /path/video.mp4 "
+            "--tracks /path/tracks.json --out-dir data/video_cycle_run --show-phase-outputs",
+            language="bash",
+        )
+        return
+
+    p1 = payload.get("phase_1_ingest", {})
+    p2 = payload.get("phase_2_vocabulary", {})
+    p3 = payload.get("phase_3_normalized_tracks", {})
+    p4 = payload.get("phase_4_moments", {})
+    p5 = payload.get("phase_5_keyframes", {})
+    p6 = payload.get("phase_6_embeddings", {})
+    p7 = payload.get("phase_7_index", {})
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Sampled Frames", p1.get("sampled_frame_count", 0))
+    c2.metric("Normalized Tracks", p3.get("normalized_track_row_count", 0))
+    c3.metric("Moments", p4.get("moment_count", 0))
+    c4.metric("Embeddings", p6.get("embedded_moment_count", 0))
+
+    tabs = st.tabs(
+        [
+            "Phase 1 Ingest",
+            "Phase 2 Vocabulary",
+            "Phase 3 Tracks",
+            "Phase 4 Moments",
+            "Phase 5 Keyframes",
+            "Phase 6 Embeddings",
+            "Phase 7 Index",
+        ]
+    )
+
+    with tabs[0]:
+        st.subheader("Manifest")
+        st.json(p1.get("manifest", {}))
+        sampled_rows = _as_rows(p1.get("sampled_frames"))
+        st.subheader("Sampled Frames")
+        if sampled_rows:
+            st.dataframe(sampled_rows, use_container_width=True)
+            _render_image_grid(sampled_rows, limit=9)
+        else:
+            st.info("No sampled frames listed.")
+
+    with tabs[1]:
+        st.subheader("Vocabulary")
+        st.write(f"Status: `{p2.get('status', 'unknown')}`")
+        st.write(f"Captions count: `{p2.get('captions_count', 0)}`")
+        st.write("Discovered labels:")
+        st.code(", ".join(p2.get("discovered_labels", [])) or "(none)")
+        st.write("Prompt terms:")
+        st.code(", ".join(p2.get("prompt_terms", [])) or "(none)")
+        st.write("Synonym map:")
+        st.json(p2.get("synonym_map", {}))
+
+    with tabs[2]:
+        st.subheader("Normalized Tracks")
+        st.write(f"Raw rows: `{p3.get('raw_track_row_count', 0)}`")
+        st.write(f"Normalized rows: `{p3.get('normalized_track_row_count', 0)}`")
+        track_rows = _as_rows(p3.get("rows"))
+        if track_rows:
+            st.dataframe(track_rows, use_container_width=True)
+        else:
+            st.info("No track rows in report.")
+
+    with tabs[3]:
+        st.subheader("Moments")
+        st.json({"moment_type_counts": p4.get("moment_type_counts", {})})
+        moment_rows = _as_rows(p4.get("moments"))
+        if moment_rows:
+            st.dataframe(moment_rows, use_container_width=True)
+        else:
+            st.info("No moments in report.")
+
+    with tabs[4]:
+        st.subheader("Moment Keyframes")
+        keyframe_rows = _as_rows(p5.get("rows"))
+        if keyframe_rows:
+            st.dataframe(keyframe_rows, use_container_width=True)
+            _render_image_grid(keyframe_rows, limit=12)
+        else:
+            st.info("No keyframes in report.")
+
+    with tabs[5]:
+        st.subheader("Embeddings")
+        st.write(f"Model: `{p6.get('embedding_model', 'unknown')}`")
+        st.write(f"Dimension: `{p6.get('embedding_dim', 0)}`")
+        embed_rows = _as_rows(p6.get("rows"))
+        if embed_rows:
+            st.dataframe(embed_rows, use_container_width=True)
+        else:
+            st.info("No embedding rows in report.")
+
+    with tabs[6]:
+        st.subheader("Index")
+        st.json(p7)
+
+
+def _render_moment_lab() -> None:
     st.title("Moment Generator Lab")
     st.caption("Generate APPEAR, DISAPPEAR, STOP, NEAR, and APPROACH moments from tracking output.")
 
@@ -214,6 +367,14 @@ def main() -> None:
         )
 
 
+def main() -> None:
+    st.set_page_config(page_title="LocalLens Dev UI", layout="wide")
+    mode = st.sidebar.radio("View", options=["Cycle Inspector", "Moment Lab"], index=0)
+    if mode == "Cycle Inspector":
+        _render_cycle_inspector()
+    else:
+        _render_moment_lab()
+
+
 if __name__ == "__main__":
     main()
-
