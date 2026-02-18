@@ -375,3 +375,22 @@ PYTHONPATH=src python -m videosearch.moment_overlay_cli \
 Useful flags:
 - `--show-all-tracks` (draw every track, not only active moment entities)
 - `--start-sec` / `--end-sec` (render only a time slice)
+
+## Episode Clip Export (Per Label)
+
+Export cropped-in-time MP4 clips for appearance episodes, with optional bbox overlays:
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_clip_cli \
+  --video /path/to/video.mp4 \
+  --run-dir data/video_cycle_run \
+  --label truck \
+  --out-dir data/video_cycle_run/truck_episode_clips \
+  --padding-sec 0.3 \
+  --max-gap-frames 2 \
+  --min-episode-frames 2
+```
+
+Output:
+- One MP4 per detected episode window.
+- `*_episode_clips_summary.json` with frame/time ranges, track IDs, and clip paths.
