@@ -189,6 +189,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print phase progress logs to stderr during long-running steps",
     )
+    parser.add_argument(
+        "--disable-semantic-index",
+        action="store_true",
+        help="Disable text-semantic indexing of moments in Phase 6/7",
+    )
+    parser.add_argument(
+        "--semantic-index-embedder",
+        default="hashing",
+        choices=["hashing", "sentence-transformer"],
+        help="Embedder for text-semantic moment indexing",
+    )
+    parser.add_argument(
+        "--semantic-index-model",
+        default=None,
+        help="Optional model name for semantic index embedder",
+    )
     return parser
 
 
@@ -328,6 +344,9 @@ def main() -> int:
         track_processing_config=track_config,
         include_full_phase_outputs=bool(args.show_full_phase_outputs),
         phase_preview_limit=int(args.phase_preview_limit),
+        semantic_index_embedder=str(args.semantic_index_embedder),
+        semantic_index_model=args.semantic_index_model,
+        enable_semantic_index=not bool(args.disable_semantic_index),
     )
     print(json.dumps(summary, indent=2, ensure_ascii=True))
 

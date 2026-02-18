@@ -208,6 +208,11 @@ Phase 3 track processing controls:
 - `--track-no-clip-bbox` (disable bbox clipping to frame bounds)
 - `--moment-labels` (default: `car,truck,bus,van,person,motorcycle`; filters out static/background classes)
 
+Phase 6/7 semantic indexing controls:
+- `--semantic-index-embedder` (`hashing` or `sentence-transformer`)
+- `--semantic-index-model` (optional model name for selected embedder)
+- `--disable-semantic-index` (skip text-semantic indexing)
+
 Auto-generate captions from a local vLLM VLM endpoint (OpenAI-compatible):
 
 ```bash
@@ -398,3 +403,29 @@ Output:
 Note:
 - Episode generation is per-track by default (avoids one long "car present" clip on busy roads).
 - Add `--label-union-episodes` if you want legacy merged label-presence windows.
+
+## Semantic Search + LLM QA (Moment Index)
+
+Semantic retrieval over indexed moment summaries:
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_semantic_cli search \
+  --run-dir data/video_cycle_run \
+  --query "truck enters the scene" \
+  --top-k 8
+```
+
+Grounded LLM answer (retrieval context is passed to LLM):
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_semantic_cli ask \
+  --run-dir data/video_cycle_run \
+  --query "When does a truck appear?" \
+  --top-k 12 \
+  --llm-endpoint http://localhost:8000/v1/chat/completions \
+  --llm-model nvidia/Qwen2.5-VL-7B-Instruct-NVFP4
+```
+
+Design note:
+- Rules are still used to cut clean moments/clips.
+- Semantic search and LLM are used to retrieve/explain those moments, not to define raw timestamps.

@@ -14,6 +14,7 @@ from urllib import request as url_request
 
 import numpy as np
 
+from .embedders import HashingEmbedder, SentenceTransformerEmbedder, build_embedder
 from .moments import Moment, MomentConfig, generate_moments
 
 
@@ -1610,12 +1611,70 @@ def build_moment_embeddings(
     return pooled, model_name
 
 
+def _format_semantic_moment_text(moment: Mapping[str, Any]) -> str:
+    moment_type = str(moment.get("type", "EVENT")).strip().upper()
+    start_time = float(moment.get("start_time", 0.0))
+    end_time = float(moment.get("end_time", 0.0))
+    metadata = moment.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        metadata = {}
+
+    label = str(metadata.get("label", "")).strip().lower() or str(metadata.get("label_group", "")).strip().lower()
+    pair = metadata.get("class_pair")
+    pair_terms: list[str] = []
+    if isinstance(pair, list):
+        pair_terms = [str(item).strip().lower() for item in pair if str(item).strip()]
+
+    subject = label or (" and ".join(pair_terms) if pair_terms else "object")
+    phrase_map = {
+        "APPEAR": f"{subject} appears",
+        "DISAPPEAR": f"{subject} disappears",
+        "STOP": f"{subject} stops",
+        "NEAR": f"{subject} near interaction",
+        "APPROACH": f"{subject} approach interaction",
+        "TRAFFIC_CHANGE": "traffic density changes",
+    }
+    phrase = phrase_map.get(moment_type, f"{subject} {moment_type.lower()}")
+    return f"{phrase}; type={moment_type}; start={start_time:.3f}s; end={end_time:.3f}s"
+
+
+def build_moment_semantic_embeddings(
+    moments: Sequence[Mapping[str, Any]],
+    *,
+    embedder_kind: str = "hashing",
+    embedder_model: str | None = None,
+) -> tuple[dict[int, str], dict[int, np.ndarray], str]:
+    if not moments:
+        return {}, {}, ""
+
+    text_rows: list[tuple[int, str]] = []
+    for row in moments:
+        moment_index = int(row.get("moment_index", -1))
+        if moment_index < 0:
+            continue
+        text_rows.append((moment_index, _format_semantic_moment_text(row)))
+    if not text_rows:
+        return {}, {}, ""
+
+    embedder = build_embedder(embedder_kind, model=embedder_model)
+    matrix = embedder.embed([text for _, text in text_rows])
+    text_map: dict[int, str] = {}
+    vec_map: dict[int, np.ndarray] = {}
+    for i, (moment_index, text) in enumerate(text_rows):
+        text_map[moment_index] = text
+        vec_map[moment_index] = matrix[i].astype(np.float32)
+    return text_map, vec_map, embedder.model_name
+
+
 def persist_moment_index(
     output_db: str | Path,
     moments: Sequence[Mapping[str, Any]],
     keyframes: Sequence[KeyframeRecord],
     embeddings: Mapping[int, np.ndarray],
     model_name: str,
+    semantic_texts: Mapping[int, str] | None = None,
+    semantic_embeddings: Mapping[int, np.ndarray] | None = None,
+    semantic_model_name: str | None = None,
 ) -> None:
     db_path = Path(output_db)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1646,8 +1705,20 @@ def persist_moment_index(
             );
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS moment_text_vectors (
+                moment_index INTEGER PRIMARY KEY,
+                text_summary TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_dim INTEGER NOT NULL,
+                model_name TEXT NOT NULL
+            );
+            """
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_moments_type ON moments(type);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_moments_video ON moments(video_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_moment_text_vectors_model ON moment_text_vectors(model_name);")
 
         keyframe_by_moment: dict[int, list[dict[str, Any]]] = {}
         for row in keyframes:
@@ -1689,6 +1760,26 @@ def persist_moment_index(
                 """,
                 (int(moment_index), vector.tobytes(), int(vector.shape[0]), model_name),
             )
+
+        if semantic_embeddings and semantic_model_name:
+            for moment_index, vector in semantic_embeddings.items():
+                text_summary = ""
+                if semantic_texts is not None:
+                    text_summary = str(semantic_texts.get(int(moment_index), ""))
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO moment_text_vectors(
+                        moment_index, text_summary, embedding, embedding_dim, model_name
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(moment_index),
+                        text_summary,
+                        vector.tobytes(),
+                        int(vector.shape[0]),
+                        str(semantic_model_name),
+                    ),
+                )
         conn.commit()
 
 
@@ -1757,6 +1848,8 @@ def build_phase_outputs(
     keyframe_rows: Sequence[Mapping[str, Any]],
     embeddings: Mapping[int, np.ndarray],
     embedding_model_name: str,
+    semantic_text_embeddings: Mapping[int, np.ndarray] | None = None,
+    semantic_embedding_model_name: str | None = None,
     index_db_path: str | Path,
     synonym_map: Mapping[str, str],
     captions: Sequence[str] | None,
@@ -1778,11 +1871,17 @@ def build_phase_outputs(
     preview_limit = _clamp_preview_limit(preview_limit)
     captions = captions or []
     index_path = Path(index_db_path)
-    db_counts = {"moments_table_rows": 0, "vectors_table_rows": 0}
+    db_counts = {"moments_table_rows": 0, "vectors_table_rows": 0, "text_vectors_table_rows": 0}
     if index_path.exists():
         with sqlite3.connect(index_path) as conn:
             db_counts["moments_table_rows"] = int(conn.execute("SELECT COUNT(*) FROM moments").fetchone()[0])
             db_counts["vectors_table_rows"] = int(conn.execute("SELECT COUNT(*) FROM moment_vectors").fetchone()[0])
+            try:
+                db_counts["text_vectors_table_rows"] = int(
+                    conn.execute("SELECT COUNT(*) FROM moment_text_vectors").fetchone()[0]
+                )
+            except sqlite3.Error:
+                db_counts["text_vectors_table_rows"] = 0
 
     phase_outputs: dict[str, Any] = {
         "phase_1_ingest": {
@@ -1846,6 +1945,13 @@ def build_phase_outputs(
             "embedding_model": embedding_model_name,
             "embedded_moment_count": len(embeddings),
             "embedding_dim": int(next(iter(embeddings.values())).shape[0]) if embeddings else 0,
+            "semantic_embedding_model": str(semantic_embedding_model_name or ""),
+            "semantic_embedded_moment_count": len(semantic_text_embeddings or {}),
+            "semantic_embedding_dim": (
+                int(next(iter((semantic_text_embeddings or {}).values())).shape[0])
+                if (semantic_text_embeddings or {})
+                else 0
+            ),
             "rows": _embedding_preview(
                 embeddings,
                 include_full=include_full,
@@ -1886,6 +1992,9 @@ def run_video_cycle(
     log_progress: bool = False,
     include_full_phase_outputs: bool = False,
     phase_preview_limit: int = 25,
+    semantic_index_embedder: str = "hashing",
+    semantic_index_model: str | None = None,
+    enable_semantic_index: bool = True,
 ) -> dict[str, Any]:
     """
     End-to-end cycle:
@@ -2199,7 +2308,26 @@ def run_video_cycle(
     )
 
     embeddings, model_name = build_moment_embeddings(keyframes, log_progress=log_progress)
-    _log_progress(log_progress, f"Phase 5/6 keyframes+embeddings done: keyframes={len(keyframes)}, embeddings={len(embeddings)}")
+    semantic_texts: dict[int, str] = {}
+    semantic_embeddings: dict[int, np.ndarray] = {}
+    semantic_model_name = ""
+    if enable_semantic_index:
+        _log_progress(log_progress, f"Phase 6 semantic text embedding start: moments={len(moment_rows)}")
+        semantic_texts, semantic_embeddings, semantic_model_name = build_moment_semantic_embeddings(
+            moment_rows,
+            embedder_kind=semantic_index_embedder,
+            embedder_model=semantic_index_model,
+        )
+        _log_progress(
+            log_progress,
+            "Phase 6 semantic text embedding done: "
+            f"embedded={len(semantic_embeddings)}, model={semantic_model_name}",
+        )
+    _log_progress(
+        log_progress,
+        "Phase 5/6 keyframes+embeddings done: "
+        f"keyframes={len(keyframes)}, embeddings={len(embeddings)}, semantic_embeddings={len(semantic_embeddings)}",
+    )
     db_path = out_dir / "moment_index.sqlite"
     persist_moment_index(
         output_db=db_path,
@@ -2207,6 +2335,9 @@ def run_video_cycle(
         keyframes=keyframes,
         embeddings=embeddings,
         model_name=model_name,
+        semantic_texts=semantic_texts,
+        semantic_embeddings=semantic_embeddings,
+        semantic_model_name=semantic_model_name,
     )
     _log_progress(log_progress, "Phase 7 index done")
 
@@ -2225,6 +2356,8 @@ def run_video_cycle(
         keyframe_rows=keyframe_payload,
         embeddings=embeddings,
         embedding_model_name=model_name,
+        semantic_text_embeddings=semantic_embeddings,
+        semantic_embedding_model_name=semantic_model_name,
         index_db_path=db_path,
         synonym_map=synonym_map,
         captions=captions,
@@ -2272,6 +2405,7 @@ def run_video_cycle(
             "moments": len(moment_rows),
             "keyframes": len(keyframes),
             "embeddings": len(embeddings),
+            "semantic_text_embeddings": len(semantic_embeddings),
         },
     }
     if captions:
@@ -2332,3 +2466,69 @@ def cosine_search_moments(
             }
         )
     return results
+
+
+def _embedder_from_model_name(model_name: str):
+    clean = model_name.strip()
+    if clean.startswith("hashing-"):
+        dim = 384
+        tail = clean.split("-")[-1]
+        if tail.isdigit():
+            dim = int(tail)
+        return HashingEmbedder(dim=dim)
+    return SentenceTransformerEmbedder(model_name=clean)
+
+
+def semantic_search_moments(
+    db_path: str | Path,
+    query: str,
+    top_k: int = 10,
+) -> list[dict[str, Any]]:
+    q = query.strip()
+    if not q:
+        raise ValueError("query cannot be empty")
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                m.moment_index, m.video_id, m.type, m.start_time, m.end_time,
+                m.entities_json, m.metadata_json, m.keyframes_json,
+                t.text_summary, t.embedding, t.embedding_dim, t.model_name
+            FROM moments m
+            JOIN moment_text_vectors t ON m.moment_index = t.moment_index
+            """
+        ).fetchall()
+
+    if not rows:
+        return []
+
+    model_name = str(rows[0][11])
+    embedder = _embedder_from_model_name(model_name)
+    query_vector = embedder.embed([q])[0].astype(np.float32)
+    norm = np.linalg.norm(query_vector)
+    if norm > 0:
+        query_vector = query_vector / norm
+
+    vectors = np.vstack([np.frombuffer(row[9], dtype=np.float32, count=int(row[10])) for row in rows])
+    scores = vectors @ query_vector
+    order = np.argsort(-scores)[:top_k]
+    out: list[dict[str, Any]] = []
+    for idx in order:
+        row = rows[int(idx)]
+        out.append(
+            {
+                "score": float(scores[idx]),
+                "moment_index": int(row[0]),
+                "video_id": str(row[1]),
+                "type": str(row[2]),
+                "start_time": float(row[3]),
+                "end_time": float(row[4]),
+                "entities": json.loads(row[5]),
+                "metadata": json.loads(row[6]),
+                "keyframes": json.loads(row[7]),
+                "text_summary": str(row[8]),
+                "model_name": model_name,
+            }
+        )
+    return out
