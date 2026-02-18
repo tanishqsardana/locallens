@@ -3,6 +3,13 @@
 from .chunking import ChunkConfig, chunk_segments
 from .embedders import BaseEmbedder, HashingEmbedder, SentenceTransformerEmbedder
 from .moments import Moment, MomentConfig, MomentGenerator, TrackObservation, generate_moments
+from .moment_query import (
+    PassThroughConfig,
+    answer_nlq,
+    frames_with_label,
+    pass_through_tracks,
+    when_object_appears,
+)
 from .pipeline import VideoSemanticSearch
 from .types import TranscriptSegment, VideoChunk, VideoTranscript
 from .video_cycle import (
@@ -50,6 +57,7 @@ __all__ = [
     "Moment",
     "MomentConfig",
     "MomentGenerator",
+    "PassThroughConfig",
     "SentenceTransformerEmbedder",
     "TrackObservation",
     "build_keyframe_targets",
@@ -59,6 +67,7 @@ __all__ = [
     "build_prompt_terms",
     "canonicalize_label",
     "cosine_search_moments",
+    "frames_with_label",
     "extract_chat_completion_text",
     "extract_object_nouns",
     "generate_groundingdino_detections",
@@ -70,7 +79,10 @@ __all__ = [
     "parse_vocab_postprocess_output",
     "process_tracking_rows",
     "postprocess_vocabulary_with_llm",
+    "pass_through_tracks",
     "run_video_cycle",
+    "answer_nlq",
+    "when_object_appears",
     "track_detections",
     "video_fps",
     "TranscriptSegment",

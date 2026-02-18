@@ -318,3 +318,40 @@ Returned moments:
 
 All distances are normalized by frame diagonal. Speed uses EMA smoothing.
 Overlapping/adjacent moments with gap `< 1s` are merged.
+
+## Operational Query Layer
+
+Query the generated moment/track artifacts for questions like:
+- "when does truck appear?"
+- "which frames contain truck?"
+- "when does this car pass through?"
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_query_cli appear \
+  --run-dir data/video_cycle_run \
+  --label truck
+```
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_query_cli frames-with \
+  --run-dir data/video_cycle_run \
+  --label truck
+```
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_query_cli pass-through \
+  --run-dir data/video_cycle_run \
+  --label car \
+  --frame-width 3840 \
+  --frame-height 2160
+```
+
+Simple NLQ router:
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_query_cli nlq \
+  --run-dir data/video_cycle_run \
+  --query "when does truck appear?" \
+  --frame-width 3840 \
+  --frame-height 2160
+```
