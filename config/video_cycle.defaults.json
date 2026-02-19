@@ -23,6 +23,7 @@
     "track_min_length": 3,
     "track_max_interp_gap": 1,
     "semantic_index_embedder": "hashing",
+    "semantic_clip_order": "123",
     "log_progress": true,
     "show_phase_outputs": true
   }

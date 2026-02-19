@@ -162,6 +162,8 @@ PYTHONPATH=src python -m videosearch.video_cycle_cli \
 
 Example config template: `config/video_cycle.defaults.json`
 
+Tip: Streamlit also reads `config/video_cycle.defaults.json` for `semantic_clip_order` (`"123"` or `"321"`).
+
 Or run tracking in-pipeline from frame-level detections:
 
 ```bash

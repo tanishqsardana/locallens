@@ -29,6 +29,7 @@ from videosearch.video_cycle import (
 SAMPLE_FILE = Path("examples/tracks/sample_static_scene.json")
 DEFAULT_PHASE_OUTPUTS = Path("data/video_cycle_run/phase_outputs.json")
 DEFAULT_RUN_DIR = Path("data/video_cycle_run")
+DEFAULT_VIDEO_CYCLE_CONFIG = Path("config/video_cycle.defaults.json")
 DEFAULT_VLM_PROMPT = (
     "List visible objects and scene elements as a comma-separated list of singular nouns, "
     "lowercase, no adjectives/colors/verbs/locations, no duplicates, max 20 terms."
@@ -65,6 +66,31 @@ def _safe_summary_read(path: Path) -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+@st.cache_data(show_spinner=False)
+def _load_video_cycle_defaults(path_text: str) -> dict[str, Any]:
+    path = Path(path_text)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    payload = raw.get("video_cycle")
+    if isinstance(payload, dict):
+        return dict(payload)
+    return dict(raw)
+
+
+def _configured_clip_order() -> str:
+    defaults = _load_video_cycle_defaults(str(DEFAULT_VIDEO_CYCLE_CONFIG))
+    value = defaults.get("semantic_clip_order")
+    if isinstance(value, str) and value in {"123", "321"}:
+        return value
+    return "123"
 
 
 def _as_rows(value: Any) -> list[dict[str, Any]]:
@@ -523,12 +549,7 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
         _render_image_grid(keyframe_rows, limit=3)
 
     st.markdown("#### Top 3 Moment Clips")
-    clip_order = st.selectbox(
-        "Clip order",
-        options=["123", "321"],
-        index=0,
-        key=f"{key_prefix}_clip_order",
-    )
+    clip_order = _configured_clip_order()
     current_query = st.session_state.get(f"{key_prefix}_query_last")
     if not isinstance(current_query, str) or not current_query.strip():
         current_query = query
