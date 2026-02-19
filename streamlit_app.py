@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-import shutil
 import subprocess
 from typing import Any, Mapping
 
@@ -170,59 +169,67 @@ def _export_query_clip(
 
     start_frame = max(0, int(start_sec * fps))
     end_frame = max(start_frame, int(end_sec * fps))
+    cap.release()
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg_path = shutil.which("ffmpeg")
-    raw_output_path = output_path.with_suffix(".raw.mp4") if ffmpeg_path else output_path
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(raw_output_path), fourcc, fps, (width, height))
-    if not writer.isOpened():
-        cap.release()
-        raise RuntimeError(f"Could not open clip writer: {raw_output_path}")
+    ffmpeg_path = _find_ffmpeg_path()
+    if ffmpeg_path is None:
+        raise RuntimeError("ffmpeg not found; install ffmpeg to enable clip generation.")
 
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-    frame_idx = start_frame
-    written = 0
-    while frame_idx <= end_frame:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        writer.write(frame)
-        frame_idx += 1
-        written += 1
+    clip_start = start_frame / fps
+    clip_end = end_frame / fps
+    if clip_end <= clip_start:
+        clip_end = clip_start + max(0.6, 2.0 / fps)
 
-    writer.release()
-    cap.release()
-    if written <= 0:
-        raise RuntimeError("No frames written while generating clip")
+    mp4_out = output_path.with_suffix(".mp4")
+    webm_out = output_path.with_suffix(".webm")
 
-    if ffmpeg_path and raw_output_path != output_path:
-        if output_path.exists():
-            output_path.unlink()
-        command = [
-            ffmpeg_path,
-            "-y",
-            "-i",
-            str(raw_output_path),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-an",
-            str(output_path),
-        ]
-        completed = subprocess.run(command, capture_output=True, text=True)
-        if completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
-            try:
-                raw_output_path.unlink(missing_ok=True)
-            except Exception:
-                pass
-            return output_path
-        # Fallback to raw clip if ffmpeg transcode fails.
-        return raw_output_path
-    return raw_output_path
+    mp4_cmd = [
+        ffmpeg_path,
+        "-y",
+        "-ss",
+        f"{clip_start:.6f}",
+        "-to",
+        f"{clip_end:.6f}",
+        "-i",
+        str(video_path),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-an",
+        str(mp4_out),
+    ]
+    mp4_result = subprocess.run(mp4_cmd, capture_output=True, text=True)
+    if mp4_result.returncode == 0 and mp4_out.exists() and mp4_out.stat().st_size > 0:
+        return mp4_out
+
+    webm_cmd = [
+        ffmpeg_path,
+        "-y",
+        "-ss",
+        f"{clip_start:.6f}",
+        "-to",
+        f"{clip_end:.6f}",
+        "-i",
+        str(video_path),
+        "-c:v",
+        "libvpx-vp9",
+        "-b:v",
+        "1M",
+        "-an",
+        str(webm_out),
+    ]
+    webm_result = subprocess.run(webm_cmd, capture_output=True, text=True)
+    if webm_result.returncode == 0 and webm_out.exists() and webm_out.stat().st_size > 0:
+        return webm_out
+
+    raise RuntimeError(
+        "Clip generation failed via ffmpeg. "
+        f"mp4_error={mp4_result.stderr[-240:]} webm_error={webm_result.stderr[-240:]}"
+    )
 
 
 def _build_query_clips(
@@ -243,7 +250,7 @@ def _build_query_clips(
         start_time = float(row.get("start_time", 0.0))
         end_time = float(row.get("end_time", start_time))
         clip_path = query_dir / f"rank_{rank:02d}_moment_{moment_index:05d}.mp4"
-        _export_query_clip(
+        final_clip_path = _export_query_clip(
             video_path=video_path,
             start_time=start_time,
             end_time=end_time,
@@ -256,7 +263,7 @@ def _build_query_clips(
                 "moment_index": moment_index,
                 "start_time": start_time,
                 "end_time": end_time,
-                "clip_path": str(clip_path),
+                "clip_path": str(final_clip_path),
             }
         )
     return out
@@ -272,6 +279,19 @@ def _find_latest_index_db(base_dir: Path) -> Path | None:
         return None
     candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
     return candidates[0]
+
+
+def _find_ffmpeg_path() -> str | None:
+    candidates = ["ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"]
+    for candidate in candidates:
+        command = [candidate, "-version"]
+        try:
+            completed = subprocess.run(command, capture_output=True, text=True)
+            if completed.returncode == 0:
+                return candidate
+        except Exception:
+            continue
+    return None
 
 
 def _list_existing_runs(base_dir: Path) -> list[Path]:
@@ -495,7 +515,12 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
                 f"rank={row.get('rank')} moment={row.get('moment_index')} "
                 f"time={start_t:.3f}s -> {end_t:.3f}s"
             )
-            st.video(path.read_bytes(), format="video/mp4")
+            mime = "video/mp4"
+            if path.suffix.lower() == ".webm":
+                mime = "video/webm"
+            elif path.suffix.lower() == ".ogg":
+                mime = "video/ogg"
+            st.video(path.read_bytes(), format=mime)
             st.download_button(
                 f"Download clip (rank {row.get('rank')})",
                 data=path.read_bytes(),
@@ -675,7 +700,7 @@ def _render_pipeline_runner() -> None:
     with c1:
         vlm_model = st.text_input("VLM model", value="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4")
     with c2:
-        st.caption("Use Advanced for scene profile and runtime controls.")
+        st.caption("Use Advanced for runtime controls.")
 
     with st.expander("Advanced (optional)", expanded=False):
         a1, a2 = st.columns(2)
