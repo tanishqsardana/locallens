@@ -19,8 +19,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Export per-label appearance episode clips with optional bbox overlays")
     parser.add_argument("--video", required=True, help="Input video path")
     parser.add_argument("--label", required=True, help="Target label (e.g., car, truck)")
-    parser.add_argument("--run-dir", default=None, help="Directory containing normalized_tracks.json")
+    parser.add_argument("--color", default=None, help="Optional color tag filter from moment metadata (e.g., white)")
+    parser.add_argument("--run-dir", default=None, help="Directory containing normalized_tracks.json and moments.json")
     parser.add_argument("--tracks", default=None, help="Track JSON path (defaults to run-dir/normalized_tracks.json)")
+    parser.add_argument("--moments", default=None, help="Moments JSON path (defaults to run-dir/moments.json)")
     parser.add_argument("--out-dir", required=True, help="Output directory for MP4 clips and summary JSON")
     parser.add_argument("--padding-sec", type=float, default=0.3, help="Seconds to pad before/after each episode")
     parser.add_argument("--max-gap-frames", type=int, default=2, help="Max frame gap for merging episode frames")
@@ -41,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     tracks_path = _resolve(args.run_dir, args.tracks, "normalized_tracks.json")
+    moments_path = (
+        _resolve(args.run_dir, args.moments, "moments.json")
+        if isinstance(args.color, str) and args.color.strip()
+        else (args.moments if args.moments else None)
+    )
     cfg = ClipExportConfig(
         codec=str(args.codec),
         padding_sec=float(args.padding_sec),
@@ -56,7 +63,9 @@ def main() -> int:
     result = export_label_episode_clips(
         video_path=args.video,
         tracks_path=tracks_path,
+        moments_path=moments_path,
         label=args.label,
+        color=args.color,
         output_dir=args.out_dir,
         config=cfg,
     )

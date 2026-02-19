@@ -413,6 +413,17 @@ Output:
 - One MP4 per detected episode window.
 - `*_episode_clips_summary.json` with frame/time ranges, track IDs, and clip paths.
 
+Optional color-aware clip export (uses VLM-derived moment tags):
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_clip_cli \
+  --video /path/to/video.mp4 \
+  --run-dir data/video_cycle_run \
+  --label car \
+  --color white \
+  --out-dir data/video_cycle_run/white_car_episode_clips
+```
+
 Note:
 - Episode generation is per-track by default (avoids one long "car present" clip on busy roads).
 - Add `--label-union-episodes` if you want legacy merged label-presence windows.

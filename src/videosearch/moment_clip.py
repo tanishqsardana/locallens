@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .moment_query import appearance_episodes, load_rows
+from .moment_query import appearance_episodes, load_rows, when_object_appears
 
 
 def _ensure_cv2() -> Any:
@@ -85,11 +85,37 @@ def _to_int(value: Any) -> Any:
     return value
 
 
+def _to_track_key(value: Any) -> str:
+    coerced = _to_int(value)
+    return str(coerced)
+
+
+def resolve_color_track_ids(
+    moments: Sequence[Mapping[str, Any]],
+    *,
+    label: str,
+    color: str | None,
+) -> set[str]:
+    if color is None:
+        return set()
+    rows = when_object_appears(moments, label=label, color=color)
+    out: set[str] = set()
+    for row in rows:
+        entities = row.get("entities", [])
+        if not isinstance(entities, list):
+            continue
+        for entity in entities:
+            out.add(_to_track_key(entity))
+    return out
+
+
 def export_label_episode_clips(
     *,
     video_path: str | Path,
     tracks_path: str | Path,
+    moments_path: str | Path | None = None,
     label: str,
+    color: str | None = None,
     output_dir: str | Path,
     config: ClipExportConfig | None = None,
 ) -> dict[str, Any]:
@@ -100,6 +126,21 @@ def export_label_episode_clips(
         raise ValueError("label cannot be empty")
 
     tracks = load_rows(tracks_path)
+    color_track_ids: set[str] = set()
+    color_value = color.strip().lower() if isinstance(color, str) and color.strip() else None
+    if color_value is not None:
+        if moments_path is None:
+            raise ValueError("moments_path is required when color filter is set")
+        moments = load_rows(moments_path)
+        color_track_ids = resolve_color_track_ids(moments, label=target, color=color_value)
+        if color_track_ids:
+            tracks = [
+                row
+                for row in tracks
+                if str(row.get("class", "")).strip().lower() == target
+                and _to_track_key(row.get("track_id")) in color_track_ids
+            ]
+
     episodes = build_label_episode_ranges(
         tracks,
         label=target,
@@ -232,7 +273,10 @@ def export_label_episode_clips(
     summary = {
         "video_path": str(video_path),
         "tracks_path": str(tracks_path),
+        "moments_path": (str(moments_path) if moments_path is not None else None),
         "label": target,
+        "color": color_value,
+        "color_track_ids": sorted(color_track_ids),
         "episode_count": len(episodes),
         "clip_count": len(clips),
         "fps": fps,

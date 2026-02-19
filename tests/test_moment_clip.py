@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from videosearch.moment_clip import ClipExportConfig, build_label_episode_ranges
+from videosearch.moment_clip import ClipExportConfig, build_label_episode_ranges, resolve_color_track_ids
 
 
 class MomentClipTest(unittest.TestCase):
@@ -45,6 +45,30 @@ class MomentClipTest(unittest.TestCase):
             per_track=False,
         )
         self.assertEqual(len(out), 1)
+
+    def test_resolve_color_track_ids(self) -> None:
+        moments = [
+            {
+                "moment_index": 0,
+                "type": "APPEAR",
+                "start_time": 1.0,
+                "end_time": 1.0,
+                "entities": [7],
+                "metadata": {"label": "truck", "label_group": "truck", "color_tags": ["white"]},
+            },
+            {
+                "moment_index": 1,
+                "type": "APPEAR",
+                "start_time": 2.0,
+                "end_time": 2.0,
+                "entities": [9],
+                "metadata": {"label": "truck", "label_group": "truck", "color_tags": ["red"]},
+            },
+        ]
+        white_ids = resolve_color_track_ids(moments, label="truck", color="white")
+        self.assertEqual(white_ids, {"7"})
+        red_ids = resolve_color_track_ids(moments, label="truck", color="red")
+        self.assertEqual(red_ids, {"9"})
 
 
 if __name__ == "__main__":
