@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+import sys
 from typing import Any, Mapping
 
 import streamlit as st
@@ -90,7 +93,7 @@ def _render_image_grid(rows: list[dict[str, Any]], limit: int = 12) -> None:
     cols = st.columns(3)
     for idx, (img_path, caption) in enumerate(images[:limit]):
         with cols[idx % 3]:
-            st.image(img_path, caption=caption, use_container_width=True)
+            st.image(img_path, caption=caption, width="stretch")
 
 
 def _ensure_cv2() -> Any:
@@ -282,15 +285,52 @@ def _find_latest_index_db(base_dir: Path) -> Path | None:
 
 
 def _find_ffmpeg_path() -> str | None:
-    candidates = ["ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/homebrew/bin/ffmpeg"]
+    candidates: list[str] = []
+    env_ffmpeg = os.environ.get("FFMPEG_BINARY")
+    if env_ffmpeg:
+        candidates.append(env_ffmpeg)
+    imageio_env = os.environ.get("IMAGEIO_FFMPEG_EXE")
+    if imageio_env:
+        candidates.append(imageio_env)
+    try:
+        venv_ffmpeg = Path(sys.executable).resolve().parent / "ffmpeg"
+        candidates.append(str(venv_ffmpeg))
+    except Exception:
+        pass
+    candidates.extend(
+        [
+            "ffmpeg",
+            "/usr/bin/ffmpeg",
+            "/usr/local/bin/ffmpeg",
+            "/opt/homebrew/bin/ffmpeg",
+            "/opt/anaconda3/bin/ffmpeg",
+        ]
+    )
+
+    seen: set[str] = set()
     for candidate in candidates:
-        command = [candidate, "-version"]
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        resolved = shutil.which(candidate) or candidate
         try:
-            completed = subprocess.run(command, capture_output=True, text=True)
+            completed = subprocess.run([resolved, "-version"], capture_output=True, text=True)
             if completed.returncode == 0:
-                return candidate
+                return resolved
         except Exception:
             continue
+
+    # Optional fallback for environments that bundle ffmpeg with imageio.
+    try:
+        import imageio_ffmpeg  # type: ignore
+
+        imageio_path = str(imageio_ffmpeg.get_ffmpeg_exe())
+        if imageio_path:
+            completed = subprocess.run([imageio_path, "-version"], capture_output=True, text=True)
+            if completed.returncode == 0:
+                return imageio_path
+    except Exception:
+        pass
     return None
 
 
@@ -441,24 +481,8 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
         st.info("No query results yet.")
         return
 
-    display_rows: list[dict[str, Any]] = []
     keyframe_rows: list[dict[str, Any]] = []
     for row in top_results:
-        metadata = row.get("metadata", {})
-        if not isinstance(metadata, Mapping):
-            metadata = {}
-        display_rows.append(
-            {
-                "moment_index": int(row.get("moment_index", -1)),
-                "score": round(float(row.get("score", 0.0)), 4),
-                "type": str(row.get("type", "")),
-                "start_time": round(float(row.get("start_time", 0.0)), 3),
-                "end_time": round(float(row.get("end_time", 0.0)), 3),
-                "label": str(metadata.get("label", metadata.get("label_group", ""))),
-                "entities": ",".join(str(item) for item in row.get("entities", [])),
-                "text_summary": str(row.get("text_summary", "")),
-            }
-        )
         keyframes = row.get("keyframes", [])
         if isinstance(keyframes, list):
             clean = [dict(item) for item in keyframes if isinstance(item, Mapping)]
@@ -466,7 +490,6 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
             if middle is not None:
                 keyframe_rows.append(middle)
 
-    st.dataframe(display_rows, use_container_width=True)
     st.download_button(
         "Download Top 3 Moments JSON",
         data=json.dumps(top_results, indent=2, ensure_ascii=True),
@@ -525,7 +548,7 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
                 f"Download clip (rank {row.get('rank')})",
                 data=path.read_bytes(),
                 file_name=path.name,
-                mime="video/mp4",
+                mime=mime,
                 key=f"{key_prefix}_clip_download_{row.get('rank')}_{row.get('moment_index')}",
             )
 
@@ -562,7 +585,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         sampled_rows = _as_rows(p1.get("sampled_frames"))
         st.subheader("Sampled Frames")
         if sampled_rows:
-            st.dataframe(sampled_rows, use_container_width=True)
+            st.dataframe(sampled_rows, width="stretch")
             _render_image_grid(sampled_rows, limit=9)
         else:
             st.info("No sampled frames listed.")
@@ -575,7 +598,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         caption_rows = _as_rows(p2.get("caption_rows"))
         if caption_rows:
             st.write("Caption rows:")
-            st.dataframe(caption_rows, use_container_width=True)
+            st.dataframe(caption_rows, width="stretch")
             st.write("VLM sampled frame previews:")
             _render_image_grid(caption_rows, limit=9)
         llm_post = p2.get("llm_postprocess", {})
@@ -610,7 +633,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
             st.json(track_processing)
         rows = _as_rows(p3.get("rows"))
         if rows:
-            st.dataframe(rows, use_container_width=True)
+            st.dataframe(rows, width="stretch")
         else:
             st.info("No track rows in report.")
 
@@ -624,7 +647,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         )
         rows = _as_rows(p4.get("moments"))
         if rows:
-            st.dataframe(rows, use_container_width=True)
+            st.dataframe(rows, width="stretch")
         else:
             st.info("No moments in report.")
 
@@ -632,7 +655,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         st.subheader("Moment Keyframes")
         rows = _as_rows(p5.get("rows"))
         if rows:
-            st.dataframe(rows, use_container_width=True)
+            st.dataframe(rows, width="stretch")
             _render_image_grid(rows, limit=12)
         else:
             st.info("No keyframes in report.")
@@ -645,7 +668,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         st.write(f"Semantic dim: `{p6.get('semantic_embedding_dim', 0)}`")
         rows = _as_rows(p6.get("rows"))
         if rows:
-            st.dataframe(rows, use_container_width=True)
+            st.dataframe(rows, width="stretch")
         else:
             st.info("No embedding rows in report.")
 
@@ -1039,7 +1062,7 @@ def _render_moment_lab() -> None:
 
     st.write(f"Loaded rows: **{len(observations_raw)}**")
     if observations_raw:
-        st.dataframe(observations_raw[: min(50, len(observations_raw))], use_container_width=True)
+        st.dataframe(observations_raw[: min(50, len(observations_raw))], width="stretch")
 
     try:
         config = _build_moment_config()
@@ -1060,7 +1083,7 @@ def _render_moment_lab() -> None:
             return
 
         st.success(f"Generated {len(moments)} moments")
-        st.dataframe(_moment_rows(moments), use_container_width=True)
+        st.dataframe(_moment_rows(moments), width="stretch")
         st.download_button(
             "Download moments JSON",
             data=json.dumps(
