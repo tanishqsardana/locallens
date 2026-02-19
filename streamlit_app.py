@@ -225,9 +225,18 @@ def _render_pipeline_runner() -> None:
     st.title("Video Pipeline Runner")
     st.caption("Autopilot run: YOLO-World + tracking + VLM captions + moment index with minimal inputs.")
 
-    video_default = st.session_state.get("last_video_path", str(DEFAULT_RUN_DIR / "video.mp4"))
+    st.session_state.setdefault("last_video_name", "")
+    uploaded_video = st.file_uploader(
+        "Select video file",
+        type=["mp4", "mov", "mkv", "avi", "webm", "m4v"],
+        accept_multiple_files=False,
+        help="Pick a local video file from your system.",
+    )
+    if uploaded_video is not None:
+        st.session_state["last_video_name"] = str(uploaded_video.name)
+    if st.session_state["last_video_name"]:
+        st.caption(f"Selected: `{st.session_state['last_video_name']}`")
 
-    video_path_text = st.text_input("Video path", value=video_default)
     c1, c2 = st.columns(2)
     with c1:
         vlm_endpoint = st.text_input("VLM endpoint", value="http://localhost:8000/v1/chat/completions")
@@ -276,23 +285,27 @@ def _render_pipeline_runner() -> None:
     if "yolo_frame_stride" not in locals():
         yolo_frame_stride = 1
 
-    out_dir_text = ""
-    try:
-        video_path_preview = _expand_path(video_path_text)
-        auto_out_dir = (Path("data/video_runs") / video_path_preview.stem).resolve()
-        out_dir_text = str(auto_out_dir)
-        st.caption(f"Output directory (auto): `{out_dir_text}`")
-    except Exception:
-        st.caption("Output directory will be created automatically from video filename.")
+    video_stem = "video_run"
+    if uploaded_video is not None and str(uploaded_video.name).strip():
+        video_stem = Path(str(uploaded_video.name)).stem or "video_run"
+    elif st.session_state["last_video_name"]:
+        video_stem = Path(str(st.session_state["last_video_name"])).stem or "video_run"
+    out_dir_text = str((Path("data/video_runs") / video_stem).resolve())
+    st.caption(f"Output directory (auto): `{out_dir_text}`")
 
     run_clicked = st.button("Run Full Pipeline", type="primary")
     if run_clicked:
         try:
-            video_path = _expand_path(video_path_text)
-            if not video_path.exists():
-                raise FileNotFoundError(f"Video path not found: {video_path}")
-            out_dir = _expand_path(out_dir_text or str(Path("data/video_runs") / video_path.stem))
+            if uploaded_video is None:
+                raise ValueError("Please select a video file before running.")
+
+            out_dir = _expand_path(out_dir_text)
             out_dir.mkdir(parents=True, exist_ok=True)
+            inputs_dir = out_dir / "inputs"
+            inputs_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = Path(str(uploaded_video.name)).name or "video.mp4"
+            video_path = inputs_dir / safe_name
+            video_path.write_bytes(uploaded_video.getbuffer())
 
             yoloworld_cfg = YOLOWorldConfig(
                 model=str(yolo_model),
@@ -371,7 +384,7 @@ def _render_pipeline_runner() -> None:
 
             st.session_state["last_summary"] = summary
             st.session_state["last_phase_outputs_path"] = summary.get("phase_outputs")
-            st.session_state["last_video_path"] = str(video_path)
+            st.session_state["last_video_name"] = safe_name
             st.success("Pipeline run completed.")
         except Exception as exc:
             st.error(f"Pipeline failed: {exc}")
