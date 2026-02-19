@@ -111,6 +111,33 @@ def _find_latest_index_db(base_dir: Path) -> Path | None:
     return candidates[0]
 
 
+def _resolve_runner_index_db() -> Path:
+    summary = st.session_state.get("last_summary")
+    if isinstance(summary, Mapping):
+        db_text = summary.get("moment_index_db")
+        if isinstance(db_text, str) and db_text.strip():
+            db_path = _expand_path(db_text)
+            if db_path.exists():
+                return db_path
+
+    run_dir_text = st.session_state.get("last_run_dir")
+    if isinstance(run_dir_text, str) and run_dir_text.strip():
+        db_path = _expand_path(run_dir_text) / "moment_index.sqlite"
+        if db_path.exists():
+            return db_path
+
+    phase_outputs_text = st.session_state.get("last_phase_outputs_path")
+    if isinstance(phase_outputs_text, str) and phase_outputs_text.strip():
+        db_path = _expand_path(phase_outputs_text).parent / "moment_index.sqlite"
+        if db_path.exists():
+            return db_path
+
+    latest = _find_latest_index_db(_expand_path("data/video_runs"))
+    if latest is not None:
+        return latest
+    return _expand_path("data/video_runs/video_run/moment_index.sqlite")
+
+
 def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
     st.markdown("### Semantic Query (Top 3)")
 
@@ -467,6 +494,7 @@ def _render_pipeline_runner() -> None:
             st.session_state["last_summary"] = summary
             st.session_state["last_phase_outputs_path"] = summary.get("phase_outputs")
             st.session_state["last_video_name"] = safe_name
+            st.session_state["last_run_dir"] = str(out_dir)
             st.success("Pipeline run completed.")
         except Exception as exc:
             st.error(f"Pipeline failed: {exc}")
@@ -484,22 +512,9 @@ def _render_pipeline_runner() -> None:
                 _render_phase_payload(payload)
 
     st.markdown("### Semantic Query")
-    summary_for_db = st.session_state.get("last_summary")
-    default_db_path = str(_expand_path(out_dir_text) / "moment_index.sqlite")
-    if isinstance(summary_for_db, Mapping):
-        db_text = summary_for_db.get("moment_index_db")
-        if isinstance(db_text, str) and db_text.strip():
-            default_db_path = str(_expand_path(db_text))
-    if not _expand_path(default_db_path).exists():
-        latest = _find_latest_index_db(_expand_path("data/video_runs"))
-        if latest is not None:
-            default_db_path = str(latest)
-    semantic_db_path_text = st.text_input(
-        "Semantic index DB path",
-        value=default_db_path,
-        key="runner_semantic_db_path",
-    )
-    _render_semantic_query_panel(_expand_path(semantic_db_path_text), key_prefix="runner")
+    resolved_db_path = _resolve_runner_index_db()
+    st.caption(f"Using index DB: `{resolved_db_path}`")
+    _render_semantic_query_panel(resolved_db_path, key_prefix="runner")
 
 
 def _render_cycle_inspector() -> None:
