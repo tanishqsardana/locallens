@@ -675,11 +675,7 @@ def _render_pipeline_runner() -> None:
     with c1:
         vlm_model = st.text_input("VLM model", value="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4")
     with c2:
-        scene_profile = st.selectbox(
-            "Scene profile",
-            options=[SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN],
-            index=0,
-        )
+        st.caption("Use Advanced for scene profile and runtime controls.")
 
     with st.expander("Advanced (optional)", expanded=False):
         a1, a2 = st.columns(2)
@@ -694,6 +690,11 @@ def _render_pipeline_runner() -> None:
             yolo_frame_stride = st.number_input("YOLO frame stride", min_value=1, max_value=200, value=1, step=1)
         with a2:
             vlm_prompt = st.text_area("VLM prompt", value=DEFAULT_VLM_PROMPT, height=96)
+            scene_profile = st.selectbox(
+                "Scene profile",
+                options=[SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN],
+                index=0,
+            )
             semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
             semantic_model = st.text_input("Semantic model (optional)", value="")
             show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
