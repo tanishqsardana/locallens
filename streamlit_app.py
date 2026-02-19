@@ -77,6 +77,12 @@ def _as_rows(value: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _preview_rows(rows: list[dict[str, Any]], *, limit: int = 300) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    return rows[:limit]
+
+
 def _render_image_grid(rows: list[dict[str, Any]], limit: int = 12) -> None:
     images: list[tuple[str, str]] = []
     for row in rows:
@@ -553,7 +559,7 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
             )
 
 
-def _render_phase_payload(payload: Mapping[str, Any]) -> None:
+def _render_phase_payload(payload: Mapping[str, Any], *, preview_limit: int = 300) -> None:
     p1 = payload.get("phase_1_ingest", {})
     p2 = payload.get("phase_2_vocabulary", {})
     p3 = payload.get("phase_3_normalized_tracks", {})
@@ -582,7 +588,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
     )
 
     with tabs[0]:
-        sampled_rows = _as_rows(p1.get("sampled_frames"))
+        sampled_rows = _preview_rows(_as_rows(p1.get("sampled_frames")), limit=preview_limit)
         st.subheader("Sampled Frames")
         if sampled_rows:
             st.dataframe(sampled_rows, width="stretch")
@@ -595,7 +601,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         st.write(f"Status: `{p2.get('status', 'unknown')}`")
         st.write(f"Scene profile: `{p2.get('scene_profile', 'unknown')}`")
         st.write(f"Captions count: `{p2.get('captions_count', 0)}`")
-        caption_rows = _as_rows(p2.get("caption_rows"))
+        caption_rows = _preview_rows(_as_rows(p2.get("caption_rows")), limit=preview_limit)
         if caption_rows:
             st.write("Caption rows:")
             st.dataframe(caption_rows, width="stretch")
@@ -631,7 +637,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         if isinstance(track_processing, dict) and track_processing:
             st.write("Track processing report:")
             st.json(track_processing)
-        rows = _as_rows(p3.get("rows"))
+        rows = _preview_rows(_as_rows(p3.get("rows")), limit=preview_limit)
         if rows:
             st.dataframe(rows, width="stretch")
         else:
@@ -645,7 +651,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
                 "color_tagged_moment_count": p4.get("color_tagged_moment_count", 0),
             }
         )
-        rows = _as_rows(p4.get("moments"))
+        rows = _preview_rows(_as_rows(p4.get("moments")), limit=preview_limit)
         if rows:
             st.dataframe(rows, width="stretch")
         else:
@@ -653,7 +659,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
 
     with tabs[4]:
         st.subheader("Moment Keyframes")
-        rows = _as_rows(p5.get("rows"))
+        rows = _preview_rows(_as_rows(p5.get("rows")), limit=preview_limit)
         if rows:
             st.dataframe(rows, width="stretch")
             _render_image_grid(rows, limit=12)
@@ -666,7 +672,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         st.write(f"Image dim: `{p6.get('embedding_dim', 0)}`")
         st.write(f"Semantic model: `{p6.get('semantic_embedding_model', '') or '(disabled)'}`")
         st.write(f"Semantic dim: `{p6.get('semantic_embedding_dim', 0)}`")
-        rows = _as_rows(p6.get("rows"))
+        rows = _preview_rows(_as_rows(p6.get("rows")), limit=preview_limit)
         if rows:
             st.dataframe(rows, width="stretch")
         else:
@@ -887,14 +893,23 @@ def _render_pipeline_runner() -> None:
             st.error(f"Pipeline failed: {exc}")
 
     summary = st.session_state.get("last_summary")
-    if isinstance(summary, Mapping):
+    show_phase_outputs_runner = st.checkbox("Show phase outputs", value=False, key="runner_show_phase_outputs")
+    phase_preview_limit_ui = st.number_input(
+        "Phase table preview rows",
+        min_value=25,
+        max_value=2000,
+        value=300,
+        step=25,
+        key="runner_phase_preview_rows",
+    )
+    if isinstance(summary, Mapping) and bool(show_phase_outputs_runner):
         phase_path_text = summary.get("phase_outputs")
         if isinstance(phase_path_text, str):
             phase_path = _expand_path(phase_path_text)
             payload = _safe_json_read(phase_path)
             if payload is not None:
                 st.markdown("### Phase Outputs")
-                _render_phase_payload(payload)
+                _render_phase_payload(payload, preview_limit=int(phase_preview_limit_ui))
 
     st.markdown("### Semantic Query")
     resolved_db_path = _resolve_runner_index_db()
@@ -940,7 +955,21 @@ def _render_cycle_inspector() -> None:
     if db_path is None:
         db_path = _expand_path(phase_path_text).parent / "moment_index.sqlite"
     _render_semantic_query_panel(db_path, key_prefix="inspector")
-    _render_phase_payload(payload)
+    show_phase_outputs_inspector = st.checkbox(
+        "Show phase outputs",
+        value=False,
+        key="inspector_show_phase_outputs",
+    )
+    phase_preview_limit_inspector = st.number_input(
+        "Phase table preview rows",
+        min_value=25,
+        max_value=2000,
+        value=300,
+        step=25,
+        key="inspector_phase_preview_rows",
+    )
+    if bool(show_phase_outputs_inspector):
+        _render_phase_payload(payload, preview_limit=int(phase_preview_limit_inspector))
 
 
 def _load_sample() -> dict[str, Any]:
