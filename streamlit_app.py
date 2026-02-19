@@ -563,7 +563,7 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
             with center:
                 st.video(path.read_bytes(), format=mime)
             st.download_button(
-                f"Download clip (moment {row.get('moment_index')})",
+                "Download clip",
                 data=path.read_bytes(),
                 file_name=path.name,
                 mime=mime,
