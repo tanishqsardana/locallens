@@ -244,6 +244,7 @@ def _render_pipeline_runner() -> None:
     with c2:
         yolo_device = st.text_input("Detector device", value="cuda")
         target_fps = st.number_input("Target FPS", min_value=1.0, max_value=120.0, value=10.0, step=1.0)
+        vlm_frame_stride = st.number_input("VLM frame stride", min_value=1, max_value=500, value=10, step=1)
 
     with st.expander("Advanced (optional)", expanded=False):
         a1, a2 = st.columns(2)
@@ -254,7 +255,6 @@ def _render_pipeline_runner() -> None:
             yolo_frame_stride = st.number_input("YOLO frame stride", min_value=1, max_value=200, value=1, step=1)
         with a2:
             vlm_prompt = st.text_area("VLM prompt", value=DEFAULT_VLM_PROMPT, height=96)
-            vlm_frame_stride = st.number_input("VLM frame stride", min_value=1, max_value=500, value=25, step=1)
             semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
             semantic_model = st.text_input("Semantic model (optional)", value="")
             show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
@@ -274,8 +274,6 @@ def _render_pipeline_runner() -> None:
         log_progress = True
     if "vlm_prompt" not in locals():
         vlm_prompt = DEFAULT_VLM_PROMPT
-    if "vlm_frame_stride" not in locals():
-        vlm_frame_stride = 25
     if "yolo_model" not in locals():
         yolo_model = "yolov8s-worldv2.pt"
     if "yolo_conf" not in locals():
