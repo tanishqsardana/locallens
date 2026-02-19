@@ -189,6 +189,21 @@ def _export_query_clip(
     clip_end = end_frame / fps
     if clip_end <= clip_start:
         clip_end = clip_start + max(0.6, 2.0 / fps)
+    base_len = max(0.0, clip_end - clip_start)
+    # For very short moments, add +5s context for easier human review.
+    if base_len < 5.0:
+        desired_extra = 5.0
+        if duration > 0:
+            end_budget = max(0.0, duration - clip_end)
+            add_end = min(desired_extra, end_budget)
+            clip_end += add_end
+            remaining = desired_extra - add_end
+            if remaining > 0:
+                clip_start = max(0.0, clip_start - remaining)
+        else:
+            clip_end += desired_extra
+        if clip_end <= clip_start:
+            clip_end = clip_start + max(0.6, 2.0 / fps)
 
     mp4_out = output_path.with_suffix(".mp4")
     webm_out = output_path.with_suffix(".webm")
@@ -525,7 +540,12 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
 
     clip_rows = st.session_state.get(f"{key_prefix}_query_clips", [])
     if isinstance(clip_rows, list) and clip_rows:
-        for row in clip_rows:
+        ordered_rows = sorted(
+            [row for row in clip_rows if isinstance(row, Mapping)],
+            key=lambda row: int(row.get("rank", 0)),
+            reverse=True,
+        )
+        for row in ordered_rows:
             if not isinstance(row, Mapping):
                 continue
             clip_path = row.get("clip_path")
