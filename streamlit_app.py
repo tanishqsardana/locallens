@@ -9,20 +9,32 @@ import streamlit as st
 from videosearch.moments import Moment, MomentConfig, TrackObservation, generate_moments
 from videosearch.video_cycle import (
     DetectionTrackingConfig,
-    GroundingDINOConfig,
     LLMVocabPostprocessConfig,
     TrackProcessingConfig,
     VLMCaptionConfig,
     YOLOWorldConfig,
-    convert_bytetrack_mot_file,
     run_video_cycle,
-    video_fps,
 )
 
 
 SAMPLE_FILE = Path("examples/tracks/sample_static_scene.json")
 DEFAULT_PHASE_OUTPUTS = Path("data/video_cycle_run/phase_outputs.json")
 DEFAULT_RUN_DIR = Path("data/video_cycle_run")
+DEFAULT_AUTO_LABELS = [
+    "person",
+    "car",
+    "truck",
+    "bus",
+    "van",
+    "motorcycle",
+    "bicycle",
+    "backpack",
+    "suitcase",
+]
+DEFAULT_VLM_PROMPT = (
+    "List visible objects and scene elements as a comma-separated list of singular nouns, "
+    "lowercase, no adjectives/colors/verbs/locations, no duplicates, max 20 terms."
+)
 
 
 def _expand_path(value: str) -> Path:
@@ -55,16 +67,6 @@ def _safe_summary_read(path: Path) -> dict[str, Any] | None:
     except Exception:
         return None
     return payload if isinstance(payload, dict) else None
-
-
-def _load_optional_json_object(path_text: str) -> dict[str, Any] | None:
-    if not path_text.strip():
-        return None
-    path = _expand_path(path_text)
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError("JSON file must contain an object")
-    return {str(k): v for k, v in raw.items()}
 
 
 def _as_rows(value: Any) -> list[dict[str, Any]]:
@@ -221,7 +223,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
 
 def _render_pipeline_runner() -> None:
     st.title("Video Pipeline Runner")
-    st.caption("Run ingest -> vocab -> detection/tracking -> moments -> keyframes -> embeddings -> index directly from UI.")
+    st.caption("Autopilot run: YOLO-World + tracking + VLM captions + moment index with minimal inputs.")
 
     if "video_a" not in st.session_state:
         st.session_state["video_a"] = ""
@@ -240,197 +242,69 @@ def _render_pipeline_runner() -> None:
             st.session_state["video_b"] = st.text_input("Video B", value=st.session_state["video_b"])
             if st.button("Use Video B"):
                 st.session_state["active_video"] = st.session_state["video_b"]
+        st.caption("Use these to store two video paths and switch between them quickly.")
 
     video_default = st.session_state.get("active_video", "")
     if not video_default:
         video_default = str(DEFAULT_RUN_DIR / "video.mp4")
 
     video_path_text = st.text_input("Video path", value=video_default)
-    out_dir_text = st.text_input("Output directory", value=str(DEFAULT_RUN_DIR))
-
-    source_mode = st.selectbox(
-        "Track input mode",
-        options=[
-            "Tracks JSON",
-            "ByteTrack MOT TXT",
-            "Detections JSON (track in pipeline)",
-            "Auto detections: YOLO-World",
-            "Auto detections: GroundingDINO",
-        ],
-        index=0,
-    )
-
-    tracks_path_text = ""
-    bytetrack_txt_text = ""
-    detections_path_text = ""
-    groundingdino_cfg: GroundingDINOConfig | None = None
-    yoloworld_cfg: YOLOWorldConfig | None = None
-    input_tracks_path: str | None = None
-    input_detections_path: str | None = None
-
-    if source_mode == "Tracks JSON":
-        tracks_path_text = st.text_input("Tracks JSON path", value=str(DEFAULT_RUN_DIR / "normalized_tracks.json"))
-    elif source_mode == "ByteTrack MOT TXT":
-        bytetrack_txt_text = st.text_input("ByteTrack MOT TXT path", value="")
-        c1, c2 = st.columns(2)
-        with c1:
-            bytetrack_class = st.text_input("ByteTrack class label", value="car")
-        with c2:
-            bytetrack_min_score = st.number_input("ByteTrack min score", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
-    elif source_mode == "Detections JSON (track in pipeline)":
-        detections_path_text = st.text_input("Detections JSON path", value="")
-    elif source_mode == "Auto detections: YOLO-World":
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            yw_model = st.text_input("YOLO-World model", value="yolov8s-worldv2.pt")
-            yw_device = st.text_input("YOLO-World device", value="cuda")
-        with c2:
-            yw_conf = st.number_input("YOLO-World confidence", min_value=0.0, max_value=1.0, value=0.3, step=0.01)
-            yw_iou = st.number_input("YOLO-World IOU threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
-        with c3:
-            yw_stride = st.number_input("YOLO-World frame stride", min_value=1, max_value=100, value=1, step=1)
-            yw_max_frames = st.number_input("YOLO-World max frames (0 = all)", min_value=0, max_value=100000, value=0, step=1)
-        yoloworld_cfg = YOLOWorldConfig(
-            model=yw_model,
-            confidence=float(yw_conf),
-            iou_threshold=float(yw_iou),
-            device=yw_device,
-            frame_stride=int(yw_stride),
-            max_frames=int(yw_max_frames),
-        )
-    else:
-        c1, c2 = st.columns(2)
-        with c1:
-            gdino_cfg_path = st.text_input("GroundingDINO config path", value="")
-            gdino_box = st.number_input("GroundingDINO box threshold", min_value=0.0, max_value=1.0, value=0.25, step=0.01)
-            gdino_device = st.text_input("GroundingDINO device", value="cuda")
-        with c2:
-            gdino_weights_path = st.text_input("GroundingDINO weights path", value="")
-            gdino_text = st.number_input("GroundingDINO text threshold", min_value=0.0, max_value=1.0, value=0.25, step=0.01)
-            gdino_stride = st.number_input("GroundingDINO frame stride", min_value=1, max_value=100, value=1, step=1)
-        gdino_max_frames = st.number_input("GroundingDINO max frames (0 = all)", min_value=0, max_value=100000, value=0, step=1)
-        groundingdino_cfg = GroundingDINOConfig(
-            model_config_path=gdino_cfg_path,
-            model_weights_path=gdino_weights_path,
-            box_threshold=float(gdino_box),
-            text_threshold=float(gdino_text),
-            device=gdino_device,
-            frame_stride=int(gdino_stride),
-            max_frames=int(gdino_max_frames),
-        )
-
-    st.markdown("### Phase 2 Vocabulary / Captions")
-    caption_mode = st.radio(
-        "Caption source",
-        options=["None", "Captions JSON path", "Auto captions via VLM"],
-        horizontal=True,
-        index=0,
-    )
-    captions_path_text = ""
-    vlm_cfg: VLMCaptionConfig | None = None
-    if caption_mode == "Captions JSON path":
-        captions_path_text = st.text_input("Captions JSON path", value=str(DEFAULT_RUN_DIR / "vlm_captions_generated.json"))
-    elif caption_mode == "Auto captions via VLM":
-        c1, c2 = st.columns(2)
-        with c1:
-            vlm_endpoint = st.text_input("VLM endpoint", value="http://localhost:8000/v1/chat/completions")
-            vlm_model = st.text_input("VLM model", value="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4")
-            vlm_prompt = st.text_area(
-                "VLM prompt",
-                value="List only visible traffic objects and road infrastructure in this frame as a comma-separated list of singular nouns, lowercase, no adjectives/colors/verbs/locations, no duplicates, max 20 terms.",
-                height=96,
-            )
-        with c2:
-            vlm_max_tokens = st.number_input("VLM max tokens", min_value=1, max_value=4096, value=120, step=1)
-            vlm_frame_stride = st.number_input("VLM frame stride", min_value=1, max_value=500, value=25, step=1)
-            vlm_timeout_sec = st.number_input("VLM timeout sec", min_value=1.0, max_value=600.0, value=60.0, step=1.0)
-            vlm_temperature = st.number_input("VLM temperature", min_value=0.0, max_value=2.0, value=0.0, step=0.1)
-            vlm_api_key = st.text_input("VLM API key (optional)", value="", type="password")
-        vlm_cfg = VLMCaptionConfig(
-            endpoint=vlm_endpoint,
-            model=vlm_model,
-            prompt=vlm_prompt,
-            max_tokens=int(vlm_max_tokens),
-            frame_stride=int(vlm_frame_stride),
-            timeout_sec=float(vlm_timeout_sec),
-            temperature=float(vlm_temperature),
-            api_key=vlm_api_key.strip() or None,
-        )
-
-    llm_postprocess_vocab = st.checkbox("Enable LLM vocabulary postprocess", value=True)
-    llm_vocab_cfg: LLMVocabPostprocessConfig | None = None
-    if llm_postprocess_vocab:
-        c1, c2 = st.columns(2)
-        with c1:
-            default_endpoint = vlm_cfg.endpoint if vlm_cfg else "http://localhost:8000/v1/chat/completions"
-            default_model = vlm_cfg.model if vlm_cfg else "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4"
-            llm_endpoint = st.text_input("LLM postprocess endpoint", value=default_endpoint)
-            llm_model = st.text_input("LLM postprocess model", value=default_model)
-            llm_api_key = st.text_input("LLM postprocess API key (optional)", value="", type="password")
-        with c2:
-            llm_max_tokens = st.number_input("LLM postprocess max tokens", min_value=1, max_value=4096, value=500, step=1)
-            llm_timeout_sec = st.number_input("LLM postprocess timeout sec", min_value=1.0, max_value=600.0, value=60.0, step=1.0)
-            llm_temperature = st.number_input("LLM postprocess temperature", min_value=0.0, max_value=2.0, value=0.0, step=0.1)
-            llm_max_terms = st.number_input("LLM max detection terms", min_value=1, max_value=256, value=20, step=1)
-        llm_vocab_cfg = LLMVocabPostprocessConfig(
-            endpoint=llm_endpoint,
-            model=llm_model,
-            max_tokens=int(llm_max_tokens),
-            timeout_sec=float(llm_timeout_sec),
-            temperature=float(llm_temperature),
-            api_key=llm_api_key.strip() or None,
-            max_detection_terms=int(llm_max_terms),
-        )
-
-    st.markdown("### Pipeline Config")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     with c1:
-        target_fps = st.number_input("Target ingest FPS", min_value=1.0, max_value=120.0, value=10.0, step=1.0)
-        synonyms_path_text = st.text_input("Synonyms JSON (optional)", value="")
+        vlm_endpoint = st.text_input("VLM endpoint", value="http://localhost:8000/v1/chat/completions")
+        vlm_model = st.text_input("VLM model", value="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4")
     with c2:
-        seed_labels_text = st.text_input("Seed labels CSV", value="car,truck,person")
-        moment_labels_text = st.text_input("Moment labels CSV", value="car,truck,bus,van,person,motorcycle")
-    with c3:
-        moment_config_path_text = st.text_input("Moment config overrides JSON (optional)", value="")
-        log_progress = st.checkbox("Log progress", value=True)
+        yolo_device = st.text_input("Detector device", value="cuda")
+        target_fps = st.number_input("Target FPS", min_value=1.0, max_value=120.0, value=10.0, step=1.0)
 
-    st.markdown("### Detection Tracking Config")
-    d1, d2, d3, d4 = st.columns(4)
-    with d1:
-        detect_track_iou = st.number_input("IOU threshold", min_value=0.01, max_value=1.0, value=0.3, step=0.01)
-    with d2:
-        detect_track_missed = st.number_input("Max missed frames", min_value=0, max_value=500, value=10, step=1)
-    with d3:
-        detect_track_conf = st.number_input("Min detection confidence", min_value=0.0, max_value=1.0, value=0.25, step=0.01)
-    with d4:
-        detect_track_class_agnostic = st.checkbox("Class agnostic tracking", value=False)
+    with st.expander("Advanced (optional)", expanded=False):
+        a1, a2 = st.columns(2)
+        with a1:
+            yolo_model = st.text_input("YOLO-World model", value="yolov8s-worldv2.pt")
+            yolo_conf = st.number_input("YOLO confidence", min_value=0.0, max_value=1.0, value=0.3, step=0.01)
+            yolo_iou = st.number_input("YOLO IOU threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
+            yolo_frame_stride = st.number_input("YOLO frame stride", min_value=1, max_value=200, value=1, step=1)
+        with a2:
+            vlm_prompt = st.text_area("VLM prompt", value=DEFAULT_VLM_PROMPT, height=96)
+            vlm_frame_stride = st.number_input("VLM frame stride", min_value=1, max_value=500, value=25, step=1)
+            semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
+            semantic_model = st.text_input("Semantic model (optional)", value="")
+            show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
+            phase_preview_limit = st.number_input("Phase preview limit", min_value=1, max_value=2000, value=25, step=1)
+            log_progress = st.checkbox("Log progress", value=True)
 
-    st.markdown("### Track Processing Config")
-    t1, t2, t3, t4 = st.columns(4)
-    with t1:
-        track_min_conf = st.number_input("Track min confidence", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
-    with t2:
-        track_min_length = st.number_input("Track min length (frames)", min_value=1, max_value=500, value=5, step=1)
-    with t3:
-        track_max_interp_gap = st.number_input("Track max interp gap", min_value=0, max_value=100, value=0, step=1)
-    with t4:
-        clip_bboxes_to_frame = st.checkbox("Clip bboxes to frame", value=True)
+    # Defaults used in autopilot mode.
+    if "semantic_embedder" not in locals():
+        semantic_embedder = "hashing"
+    if "semantic_model" not in locals():
+        semantic_model = ""
+    if "show_full_phase_outputs" not in locals():
+        show_full_phase_outputs = False
+    if "phase_preview_limit" not in locals():
+        phase_preview_limit = 25
+    if "log_progress" not in locals():
+        log_progress = True
+    if "vlm_prompt" not in locals():
+        vlm_prompt = DEFAULT_VLM_PROMPT
+    if "vlm_frame_stride" not in locals():
+        vlm_frame_stride = 25
+    if "yolo_model" not in locals():
+        yolo_model = "yolov8s-worldv2.pt"
+    if "yolo_conf" not in locals():
+        yolo_conf = 0.3
+    if "yolo_iou" not in locals():
+        yolo_iou = 0.7
+    if "yolo_frame_stride" not in locals():
+        yolo_frame_stride = 1
 
-    st.markdown("### Phase 6/7 Semantic Index Config")
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        enable_semantic_index = st.checkbox("Enable semantic index", value=True)
-    with s2:
-        semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
-    with s3:
-        semantic_model = st.text_input("Semantic model (optional)", value="")
-
-    st.markdown("### Phase Output Display")
-    o1, o2 = st.columns(2)
-    with o1:
-        show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
-    with o2:
-        phase_preview_limit = st.number_input("Phase preview limit", min_value=1, max_value=2000, value=25, step=1)
+    out_dir_text = ""
+    try:
+        video_path_preview = _expand_path(video_path_text)
+        auto_out_dir = (Path("data/video_runs") / video_path_preview.stem).resolve()
+        out_dir_text = str(auto_out_dir)
+        st.caption(f"Output directory (auto): `{out_dir_text}`")
+    except Exception:
+        st.caption("Output directory will be created automatically from video filename.")
 
     run_clicked = st.button("Run Full Pipeline", type="primary")
     if run_clicked:
@@ -438,99 +312,73 @@ def _render_pipeline_runner() -> None:
             video_path = _expand_path(video_path_text)
             if not video_path.exists():
                 raise FileNotFoundError(f"Video path not found: {video_path}")
-            out_dir = _expand_path(out_dir_text)
+            out_dir = _expand_path(out_dir_text or str(Path("data/video_runs") / video_path.stem))
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            if source_mode == "Tracks JSON":
-                tracks_path = _expand_path(tracks_path_text)
-                if not tracks_path.exists():
-                    raise FileNotFoundError(f"Tracks JSON not found: {tracks_path}")
-                input_tracks_path = str(tracks_path)
-            elif source_mode == "ByteTrack MOT TXT":
-                bt_path = _expand_path(bytetrack_txt_text)
-                if not bt_path.exists():
-                    raise FileNotFoundError(f"ByteTrack txt not found: {bt_path}")
-                fps = video_fps(video_path)
-                converted = convert_bytetrack_mot_file(
-                    mot_txt_path=bt_path,
-                    fps=fps,
-                    class_label=bytetrack_class.strip() or "car",
-                    min_score=float(bytetrack_min_score),
-                )
-                inputs_dir = out_dir / "inputs"
-                inputs_dir.mkdir(parents=True, exist_ok=True)
-                converted_path = inputs_dir / "converted_tracks_from_bytetrack.json"
-                converted_path.write_text(json.dumps(converted, indent=2, ensure_ascii=True), encoding="utf-8")
-                input_tracks_path = str(converted_path)
-            elif source_mode == "Detections JSON (track in pipeline)":
-                det_path = _expand_path(detections_path_text)
-                if not det_path.exists():
-                    raise FileNotFoundError(f"Detections JSON not found: {det_path}")
-                input_detections_path = str(det_path)
-            elif source_mode == "Auto detections: YOLO-World":
-                if yoloworld_cfg is None:
-                    raise ValueError("YOLO-World config missing")
-                yoloworld_cfg.validate()
-            else:
-                if groundingdino_cfg is None:
-                    raise ValueError("GroundingDINO config missing")
-                groundingdino_cfg.validate()
+            yoloworld_cfg = YOLOWorldConfig(
+                model=str(yolo_model),
+                confidence=float(yolo_conf),
+                iou_threshold=float(yolo_iou),
+                device=str(yolo_device),
+                frame_stride=int(yolo_frame_stride),
+                max_frames=0,
+            )
+            yoloworld_cfg.validate()
 
-            captions_path = None
-            if caption_mode == "Captions JSON path":
-                cp = _expand_path(captions_path_text)
-                if not cp.exists():
-                    raise FileNotFoundError(f"Captions JSON not found: {cp}")
-                captions_path = str(cp)
-            if vlm_cfg is not None:
-                vlm_cfg.validate()
-            if llm_vocab_cfg is not None:
-                llm_vocab_cfg.validate()
+            vlm_cfg = VLMCaptionConfig(
+                endpoint=str(vlm_endpoint),
+                model=str(vlm_model),
+                prompt=str(vlm_prompt),
+                max_tokens=120,
+                frame_stride=int(vlm_frame_stride),
+                timeout_sec=60.0,
+                temperature=0.0,
+                api_key=None,
+            )
+            vlm_cfg.validate()
+
+            llm_vocab_cfg = LLMVocabPostprocessConfig(
+                endpoint=str(vlm_endpoint),
+                model=str(vlm_model),
+                max_tokens=500,
+                timeout_sec=60.0,
+                temperature=0.0,
+                api_key=None,
+                max_detection_terms=20,
+            )
+            llm_vocab_cfg.validate()
 
             detection_tracking_cfg = DetectionTrackingConfig(
-                iou_threshold=float(detect_track_iou),
-                max_missed_frames=int(detect_track_missed),
-                min_detection_confidence=float(detect_track_conf),
-                class_aware=not bool(detect_track_class_agnostic),
+                iou_threshold=0.3,
+                max_missed_frames=12,
+                min_detection_confidence=0.2,
+                class_aware=True,
             )
             detection_tracking_cfg.validate()
 
             track_processing_cfg = TrackProcessingConfig(
-                min_confidence=float(track_min_conf),
-                min_track_length_frames=int(track_min_length),
-                max_interp_gap_frames=int(track_max_interp_gap),
-                clip_bboxes_to_frame=bool(clip_bboxes_to_frame),
+                min_confidence=0.0,
+                min_track_length_frames=3,
+                max_interp_gap_frames=1,
+                clip_bboxes_to_frame=True,
             )
             track_processing_cfg.validate()
-
-            synonyms_path = None
-            if synonyms_path_text.strip():
-                sp = _expand_path(synonyms_path_text)
-                if not sp.exists():
-                    raise FileNotFoundError(f"Synonyms JSON not found: {sp}")
-                synonyms_path = str(sp)
-
-            moment_overrides = _load_optional_json_object(moment_config_path_text)
 
             with st.spinner("Running full video cycle. This can take a while on long videos..."):
                 summary = run_video_cycle(
                     video_path=str(video_path),
-                    tracks_path=input_tracks_path,
-                    detections_path=input_detections_path,
-                    groundingdino_config=groundingdino_cfg,
+                    tracks_path=None,
+                    detections_path=None,
+                    groundingdino_config=None,
                     yoloworld_config=yoloworld_cfg,
                     output_dir=str(out_dir),
-                    detection_tracking_config=(
-                        detection_tracking_cfg
-                        if (input_detections_path or groundingdino_cfg is not None or yoloworld_cfg is not None)
-                        else None
-                    ),
-                    captions_path=captions_path,
-                    synonyms_path=synonyms_path,
-                    seed_labels=_parse_csv(seed_labels_text),
-                    moment_label_allowlist=_parse_csv(moment_labels_text),
+                    detection_tracking_config=detection_tracking_cfg,
+                    captions_path=None,
+                    synonyms_path=None,
+                    seed_labels=list(DEFAULT_AUTO_LABELS),
+                    moment_label_allowlist=list(DEFAULT_AUTO_LABELS),
                     target_fps=float(target_fps),
-                    moment_overrides=moment_overrides,
+                    moment_overrides=None,
                     track_processing_config=track_processing_cfg,
                     vlm_caption_config=vlm_cfg,
                     llm_vocab_postprocess_config=llm_vocab_cfg,
@@ -539,7 +387,7 @@ def _render_pipeline_runner() -> None:
                     phase_preview_limit=int(phase_preview_limit),
                     semantic_index_embedder=semantic_embedder,
                     semantic_index_model=(semantic_model.strip() or None),
-                    enable_semantic_index=bool(enable_semantic_index),
+                    enable_semantic_index=True,
                 )
 
             st.session_state["last_summary"] = summary
