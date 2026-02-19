@@ -131,6 +131,25 @@ The app now has two views in the sidebar:
 
 ## Full Video Cycle (Video -> Moments -> Keyframes -> Index)
 
+### CV Architecture (Short)
+
+```text
+Input video -> frame sampling (ingest) -> VLM tag discovery -> open-vocab detection (YOLO-World / GroundingDINO) -> object tracking -> moment generation -> keyframe extraction -> embeddings + semantic index -> retrieval
+```
+
+`embeddings + semantic index` means:
+- Visual moment embedding:
+  - extract `start/middle/end` keyframes per moment
+  - compute `histogram-rgb-16` feature per keyframe
+  - average-pool keyframe vectors into one vector per moment
+- Semantic text embedding:
+  - build a short text summary per moment (type, label, timing, metadata)
+  - embed summary text (`hashing` or `sentence-transformer`)
+- Index storage:
+  - persist moments + vectors in `moment_index.sqlite`
+  - semantic retrieval runs cosine similarity over text vectors and returns top-k moments
+  - UI then shows middle-frame previews and optional clip exports for verification
+
 Install video dependencies:
 
 ```bash
