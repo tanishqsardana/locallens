@@ -14,6 +14,7 @@ from videosearch.video_cycle import (
     VLMCaptionConfig,
     YOLOWorldConfig,
     run_video_cycle,
+    semantic_search_moments,
 )
 
 
@@ -96,6 +97,71 @@ def _render_image_grid(rows: list[dict[str, Any]], limit: int = 12) -> None:
     for idx, (img_path, caption) in enumerate(images[:limit]):
         with cols[idx % 3]:
             st.image(img_path, caption=caption, use_container_width=True)
+
+
+def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
+    st.markdown("### Semantic Query (Top 3)")
+    if not db_path.exists():
+        st.info(f"Index DB not found: `{db_path}`")
+        return
+
+    query = st.text_input(
+        "Ask a retrieval query",
+        value="when does truck appear?",
+        key=f"{key_prefix}_query_text",
+    )
+    search_clicked = st.button("Run Semantic Search", key=f"{key_prefix}_query_run")
+    if search_clicked:
+        try:
+            results = semantic_search_moments(db_path=str(db_path), query=query, top_k=3)
+            st.session_state[f"{key_prefix}_query_results"] = results[:3]
+            st.session_state[f"{key_prefix}_query_last"] = query
+        except Exception as exc:
+            st.error(f"Semantic search failed: {exc}")
+
+    results = st.session_state.get(f"{key_prefix}_query_results", [])
+    if not isinstance(results, list):
+        results = []
+    top_results = [row for row in results[:3] if isinstance(row, Mapping)]
+    if not top_results:
+        st.info("No query results yet.")
+        return
+
+    display_rows: list[dict[str, Any]] = []
+    keyframe_rows: list[dict[str, Any]] = []
+    for row in top_results:
+        metadata = row.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            metadata = {}
+        display_rows.append(
+            {
+                "moment_index": int(row.get("moment_index", -1)),
+                "score": round(float(row.get("score", 0.0)), 4),
+                "type": str(row.get("type", "")),
+                "start_time": round(float(row.get("start_time", 0.0)), 3),
+                "end_time": round(float(row.get("end_time", 0.0)), 3),
+                "label": str(metadata.get("label", metadata.get("label_group", ""))),
+                "entities": ",".join(str(item) for item in row.get("entities", [])),
+                "text_summary": str(row.get("text_summary", "")),
+            }
+        )
+        keyframes = row.get("keyframes", [])
+        if isinstance(keyframes, list):
+            for item in keyframes:
+                if isinstance(item, Mapping):
+                    keyframe_rows.append(dict(item))
+
+    st.dataframe(display_rows, use_container_width=True)
+    st.download_button(
+        "Download Top 3 Moments JSON",
+        data=json.dumps(top_results, indent=2, ensure_ascii=True),
+        file_name="semantic_top3_moments.json",
+        mime="application/json",
+        key=f"{key_prefix}_download_top3",
+    )
+    if keyframe_rows:
+        st.write("Keyframe previews for top 3 results:")
+        _render_image_grid(keyframe_rows, limit=9)
 
 
 def _render_phase_payload(payload: Mapping[str, Any]) -> None:
@@ -391,6 +457,9 @@ def _render_pipeline_runner() -> None:
     if isinstance(summary, Mapping):
         st.markdown("### Run Summary")
         st.json(dict(summary))
+        db_path_text = summary.get("moment_index_db")
+        if isinstance(db_path_text, str) and db_path_text.strip():
+            _render_semantic_query_panel(_expand_path(db_path_text), key_prefix="runner")
         phase_path_text = summary.get("phase_outputs")
         if isinstance(phase_path_text, str):
             phase_path = _expand_path(phase_path_text)
@@ -415,6 +484,14 @@ def _render_cycle_inspector() -> None:
     if summary is not None:
         with st.expander("run_summary.json", expanded=False):
             st.json(summary)
+    db_path = None
+    if isinstance(summary, Mapping):
+        db_text = summary.get("moment_index_db")
+        if isinstance(db_text, str) and db_text.strip():
+            db_path = _expand_path(db_text)
+    if db_path is None:
+        db_path = _expand_path(phase_path_text).parent / "moment_index.sqlite"
+    _render_semantic_query_panel(db_path, key_prefix="inspector")
     _render_phase_payload(payload)
 
 
