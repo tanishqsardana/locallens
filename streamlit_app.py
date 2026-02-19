@@ -523,6 +523,12 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
         _render_image_grid(keyframe_rows, limit=3)
 
     st.markdown("#### Top 3 Moment Clips")
+    clip_order = st.selectbox(
+        "Clip order",
+        options=["123", "321"],
+        index=0,
+        key=f"{key_prefix}_clip_order",
+    )
     current_query = st.session_state.get(f"{key_prefix}_query_last")
     if not isinstance(current_query, str) or not current_query.strip():
         current_query = query
@@ -543,7 +549,7 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
         ordered_rows = sorted(
             [row for row in clip_rows if isinstance(row, Mapping)],
             key=lambda row: int(row.get("rank", 0)),
-            reverse=False,
+            reverse=(clip_order == "321"),
         )
         for row in ordered_rows:
             if not isinstance(row, Mapping):
