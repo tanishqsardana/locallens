@@ -16,8 +16,6 @@ from videosearch.video_cycle import (
     DetectionTrackingConfig,
     LLMVocabPostprocessConfig,
     SCENE_PROFILE_AUTO,
-    SCENE_PROFILE_PEDESTRIAN,
-    SCENE_PROFILE_TRAFFIC,
     TrackProcessingConfig,
     VLMCaptionConfig,
     YOLOWorldConfig,
@@ -692,8 +690,10 @@ def _render_phase_payload(payload: Mapping[str, Any], *, preview_limit: int = 30
             _render_image_grid(caption_rows, limit=9)
         llm_post = p2.get("llm_postprocess", {})
         if isinstance(llm_post, dict) and llm_post:
-            st.write("LLM postprocess:")
-            st.json(llm_post)
+            safe_llm_post = {k: v for k, v in llm_post.items() if k not in {"error", "raw_response_text"}}
+            if safe_llm_post:
+                st.write("LLM postprocess:")
+                st.json(safe_llm_post)
         st.write("Discovered labels:")
         st.code(", ".join(p2.get("discovered_labels", [])) or "(none)")
         st.write("Prompt terms:")
@@ -868,14 +868,6 @@ def _render_pipeline_runner() -> None:
                 "VLM prompt",
                 value=_cfg_str(defaults_cfg, "vlm_prompt", DEFAULT_VLM_PROMPT),
                 height=96,
-            )
-            scene_default = _cfg_str(defaults_cfg, "scene_profile", SCENE_PROFILE_AUTO)
-            scene_options = [SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN]
-            scene_index = scene_options.index(scene_default) if scene_default in scene_options else 0
-            scene_profile = st.selectbox(
-                "Scene profile",
-                options=scene_options,
-                index=scene_index,
             )
             semantic_default = _cfg_str(defaults_cfg, "semantic_index_embedder", "hashing")
             semantic_options = ["hashing", "sentence-transformer"]
