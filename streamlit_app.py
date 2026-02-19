@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
 from typing import Any, Mapping
 
 import streamlit as st
@@ -155,6 +157,9 @@ def _export_query_clip(
         fps = 30.0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    if width <= 0 or height <= 0:
+        cap.release()
+        raise RuntimeError(f"Invalid video dimensions for clip export: {video_path}")
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration = (frame_count / fps) if frame_count > 0 else 0.0
 
@@ -167,24 +172,57 @@ def _export_query_clip(
     end_frame = max(start_frame, int(end_sec * fps))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg_path = shutil.which("ffmpeg")
+    raw_output_path = output_path.with_suffix(".raw.mp4") if ffmpeg_path else output_path
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    writer = cv2.VideoWriter(str(raw_output_path), fourcc, fps, (width, height))
     if not writer.isOpened():
         cap.release()
-        raise RuntimeError(f"Could not open clip writer: {output_path}")
+        raise RuntimeError(f"Could not open clip writer: {raw_output_path}")
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     frame_idx = start_frame
+    written = 0
     while frame_idx <= end_frame:
         ok, frame = cap.read()
         if not ok:
             break
         writer.write(frame)
         frame_idx += 1
+        written += 1
 
     writer.release()
     cap.release()
-    return output_path
+    if written <= 0:
+        raise RuntimeError("No frames written while generating clip")
+
+    if ffmpeg_path and raw_output_path != output_path:
+        if output_path.exists():
+            output_path.unlink()
+        command = [
+            ffmpeg_path,
+            "-y",
+            "-i",
+            str(raw_output_path),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-movflags",
+            "+faststart",
+            "-an",
+            str(output_path),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True)
+        if completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            try:
+                raw_output_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return output_path
+        # Fallback to raw clip if ffmpeg transcode fails.
+        return raw_output_path
+    return raw_output_path
 
 
 def _build_query_clips(
@@ -277,29 +315,102 @@ def _resolve_runner_index_db() -> Path:
     return _expand_path("data/video_runs/video_run/moment_index.sqlite")
 
 
+def _is_person_related_result(row: Mapping[str, Any]) -> bool:
+    moment_type = str(row.get("type", "")).strip().upper()
+    if moment_type == "NO_PEOPLE":
+        return True
+    metadata = row.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        return False
+    label = str(metadata.get("label", "")).strip().lower()
+    group = str(metadata.get("label_group", "")).strip().lower()
+    targets = {label, group}
+    return any(token in targets for token in {"person", "people", "pedestrian"})
+
+
+def _filter_semantic_results_for_query(query: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    q = query.strip().lower()
+    if not q:
+        return rows
+    out = list(rows)
+
+    people_query = bool(re.search(r"\b(person|people|pedestrian)s?\b", q))
+    if people_query:
+        person_rows = [row for row in out if _is_person_related_result(row)]
+        if person_rows:
+            out = person_rows
+
+    if re.search(r"\b(no|without)\s+people\b", q) or re.search(r"\bempty\s+frame", q):
+        no_people = [row for row in out if str(row.get("type", "")).strip().upper() == "NO_PEOPLE"]
+        if no_people:
+            out = no_people
+        return out
+
+    if "appear" in q:
+        appear = [row for row in out if str(row.get("type", "")).strip().upper() == "APPEAR"]
+        if appear:
+            out = appear
+
+    if any(token in q for token in ("leave", "leaving", "left", "disappear", "exit")):
+        disappear = [row for row in out if str(row.get("type", "")).strip().upper() == "DISAPPEAR"]
+        if disappear:
+            out = disappear
+
+    if any(token in q for token in ("appear", "leave", "leaving", "disappear", "exit")):
+        focused = [row for row in out if str(row.get("type", "")).strip().upper() in {"APPEAR", "DISAPPEAR", "NO_PEOPLE"}]
+        if focused:
+            out = focused
+    return out
+
+
+def _pick_middle_keyframe(keyframes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not keyframes:
+        return None
+    middle = [row for row in keyframes if str(row.get("role", "")).strip().lower() == "middle"]
+    if middle:
+        return dict(middle[0])
+    ordered = sorted(
+        keyframes,
+        key=lambda row: (float(row.get("time_sec", 0.0)), int(row.get("frame_idx", 0))),
+    )
+    return dict(ordered[len(ordered) // 2])
+
+
 def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
     st.markdown("### Semantic Query (Top 3)")
 
     query = st.text_input(
         "Ask a retrieval query",
-        value="when does truck appear?",
+        value="",
         key=f"{key_prefix}_query_text",
+        placeholder="e.g., when do people appear",
     )
     search_clicked = st.button("Run Semantic Search", key=f"{key_prefix}_query_run")
     if search_clicked:
+        if not query.strip():
+            st.warning("Enter a query first.")
+            return
         if not db_path.exists():
-            st.error(f"Index DB not found: `{db_path}`")
+            st.error("Semantic index not found yet. Run pipeline first.")
             return
         try:
-            results = semantic_search_moments(db_path=str(db_path), query=query, top_k=3)
-            st.session_state[f"{key_prefix}_query_results"] = results[:3]
+            results = semantic_search_moments(db_path=str(db_path), query=query, top_k=12)
+            filtered = _filter_semantic_results_for_query(query, [dict(row) for row in results])
+            person_query = bool(re.search(r"\b(person|people|pedestrian)s?\b", query.strip().lower()))
+            if filtered:
+                final = filtered[:3]
+            elif person_query:
+                final = []
+            else:
+                final = [dict(row) for row in results[:3]]
+            st.session_state[f"{key_prefix}_query_results"] = final
             st.session_state[f"{key_prefix}_query_last"] = query
             st.session_state[f"{key_prefix}_query_clips"] = []
         except Exception as exc:
             st.error(f"Semantic search failed: {exc}")
 
     if not db_path.exists():
-        st.caption(f"Set a valid index DB path or run pipeline first. Current path: `{db_path}`")
+        st.info("Run the pipeline to build an index, then query here.")
         return
 
     results = st.session_state.get(f"{key_prefix}_query_results", [])
@@ -330,9 +441,10 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
         )
         keyframes = row.get("keyframes", [])
         if isinstance(keyframes, list):
-            for item in keyframes:
-                if isinstance(item, Mapping):
-                    keyframe_rows.append(dict(item))
+            clean = [dict(item) for item in keyframes if isinstance(item, Mapping)]
+            middle = _pick_middle_keyframe(clean)
+            if middle is not None:
+                keyframe_rows.append(middle)
 
     st.dataframe(display_rows, use_container_width=True)
     st.download_button(
@@ -343,8 +455,8 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
         key=f"{key_prefix}_download_top3",
     )
     if keyframe_rows:
-        st.write("Keyframe previews for top 3 results:")
-        _render_image_grid(keyframe_rows, limit=9)
+        st.write("Middle-frame previews for top 3 results:")
+        _render_image_grid(keyframe_rows, limit=3)
 
     st.markdown("#### Top 3 Moment Clips")
     current_query = st.session_state.get(f"{key_prefix}_query_last")
@@ -383,7 +495,7 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
                 f"rank={row.get('rank')} moment={row.get('moment_index')} "
                 f"time={start_t:.3f}s -> {end_t:.3f}s"
             )
-            st.video(str(path))
+            st.video(path.read_bytes(), format="video/mp4")
             st.download_button(
                 f"Download clip (rank {row.get('rank')})",
                 data=path.read_bytes(),
@@ -422,8 +534,6 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
     )
 
     with tabs[0]:
-        st.subheader("Manifest")
-        st.json(p1.get("manifest", {}))
         sampled_rows = _as_rows(p1.get("sampled_frames"))
         st.subheader("Sampled Frames")
         if sampled_rows:
@@ -563,27 +673,27 @@ def _render_pipeline_runner() -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        vlm_endpoint = st.text_input("VLM endpoint", value="http://localhost:8000/v1/chat/completions")
         vlm_model = st.text_input("VLM model", value="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4")
     with c2:
-        yolo_device = st.text_input("Detector device", value="cuda")
-        target_fps = st.number_input("Target FPS", min_value=1.0, max_value=120.0, value=10.0, step=1.0)
-        vlm_frame_stride = st.number_input("VLM frame stride", min_value=1, max_value=500, value=10, step=1)
+        scene_profile = st.selectbox(
+            "Scene profile",
+            options=[SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN],
+            index=0,
+        )
 
     with st.expander("Advanced (optional)", expanded=False):
         a1, a2 = st.columns(2)
         with a1:
+            vlm_endpoint = st.text_input("VLM endpoint", value="http://localhost:8000/v1/chat/completions")
+            yolo_device = st.text_input("Detector device", value="cuda")
+            target_fps = st.number_input("Target FPS", min_value=1.0, max_value=120.0, value=10.0, step=1.0)
+            vlm_frame_stride = st.number_input("VLM frame stride", min_value=1, max_value=500, value=10, step=1)
             yolo_model = st.text_input("YOLO-World model", value="yolov8s-worldv2.pt")
             yolo_conf = st.number_input("YOLO confidence", min_value=0.0, max_value=1.0, value=0.3, step=0.01)
             yolo_iou = st.number_input("YOLO IOU threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
             yolo_frame_stride = st.number_input("YOLO frame stride", min_value=1, max_value=200, value=1, step=1)
         with a2:
             vlm_prompt = st.text_area("VLM prompt", value=DEFAULT_VLM_PROMPT, height=96)
-            scene_profile = st.selectbox(
-                "Scene profile",
-                options=[SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN],
-                index=0,
-            )
             semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
             semantic_model = st.text_input("Semantic model (optional)", value="")
             show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
@@ -603,6 +713,14 @@ def _render_pipeline_runner() -> None:
         log_progress = True
     if "scene_profile" not in locals():
         scene_profile = SCENE_PROFILE_AUTO
+    if "vlm_endpoint" not in locals():
+        vlm_endpoint = "http://localhost:8000/v1/chat/completions"
+    if "yolo_device" not in locals():
+        yolo_device = "cuda"
+    if "target_fps" not in locals():
+        target_fps = 10.0
+    if "vlm_frame_stride" not in locals():
+        vlm_frame_stride = 10
     if "vlm_prompt" not in locals():
         vlm_prompt = DEFAULT_VLM_PROMPT
     if "yolo_model" not in locals():
@@ -620,7 +738,6 @@ def _render_pipeline_runner() -> None:
     elif st.session_state["last_video_name"]:
         video_stem = Path(str(st.session_state["last_video_name"])).stem or "video_run"
     out_dir_text = str((Path("data/video_runs") / video_stem).resolve())
-    st.caption(f"Output directory (auto): `{out_dir_text}`")
 
     run_clicked = st.button("Run Full Pipeline", type="primary")
     if run_clicked:
@@ -722,8 +839,6 @@ def _render_pipeline_runner() -> None:
 
     summary = st.session_state.get("last_summary")
     if isinstance(summary, Mapping):
-        st.markdown("### Run Summary")
-        st.json(dict(summary))
         phase_path_text = summary.get("phase_outputs")
         if isinstance(phase_path_text, str):
             phase_path = _expand_path(phase_path_text)
@@ -734,7 +849,6 @@ def _render_pipeline_runner() -> None:
 
     st.markdown("### Semantic Query")
     resolved_db_path = _resolve_runner_index_db()
-    st.caption(f"Using index DB: `{resolved_db_path}`")
     _render_semantic_query_panel(resolved_db_path, key_prefix="runner")
 
 
@@ -769,9 +883,6 @@ def _render_cycle_inspector() -> None:
 
     summary_path = _expand_path(phase_path_text).parent / "run_summary.json"
     summary = _safe_summary_read(summary_path)
-    if summary is not None:
-        with st.expander("run_summary.json", expanded=False):
-            st.json(summary)
     db_path = None
     if isinstance(summary, Mapping):
         db_text = summary.get("moment_index_db")
@@ -946,8 +1057,8 @@ def _render_moment_lab() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="LocalLens Dev UI", layout="wide")
-    mode = st.sidebar.radio("View", options=["Pipeline Runner", "Cycle Inspector", "Moment Lab"], index=0)
+    st.set_page_config(page_title="LocalLens Dev UI", layout="wide", initial_sidebar_state="collapsed")
+    mode = st.radio("View", options=["Pipeline Runner", "Cycle Inspector", "Moment Lab"], index=0, horizontal=True)
     if mode == "Pipeline Runner":
         _render_pipeline_runner()
     elif mode == "Cycle Inspector":
