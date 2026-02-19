@@ -93,6 +93,50 @@ def _configured_clip_order() -> str:
     return "123"
 
 
+def _cfg_str(cfg: Mapping[str, Any], key: str, default: str) -> str:
+    value = cfg.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    return default
+
+
+def _cfg_float(cfg: Mapping[str, Any], key: str, default: float) -> float:
+    value = cfg.get(key)
+    try:
+        if value is None:
+            return float(default)
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _cfg_int(cfg: Mapping[str, Any], key: str, default: int) -> int:
+    value = cfg.get(key)
+    try:
+        if value is None:
+            return int(default)
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _cfg_bool(cfg: Mapping[str, Any], key: str, default: bool) -> bool:
+    value = cfg.get(key)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return bool(default)
+
+
 def _as_rows(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         rows: list[dict[str, Any]] = []
@@ -725,6 +769,7 @@ def _render_phase_payload(payload: Mapping[str, Any], *, preview_limit: int = 30
 def _render_pipeline_runner() -> None:
     st.title("Video Pipeline Runner")
     st.caption("Autopilot run: YOLO-World + tracking + VLM captions + moment index with minimal inputs.")
+    defaults_cfg = _load_video_cycle_defaults(str(DEFAULT_VIDEO_CYCLE_CONFIG))
 
     existing_runs = _list_existing_runs(_expand_path("data/video_runs"))
     if existing_runs:
@@ -766,30 +811,92 @@ def _render_pipeline_runner() -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        vlm_model = st.text_input("VLM model", value="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4")
+        vlm_model = st.text_input(
+            "VLM model",
+            value=_cfg_str(defaults_cfg, "vlm_model", "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4"),
+        )
 
     with st.expander("Advanced (optional)", expanded=False):
         a1, a2 = st.columns(2)
         with a1:
-            vlm_endpoint = st.text_input("VLM endpoint", value="http://localhost:8000/v1/chat/completions")
-            yolo_device = st.text_input("Detector device", value="cuda")
-            target_fps = st.number_input("Target FPS", min_value=1.0, max_value=120.0, value=10.0, step=1.0)
-            vlm_frame_stride = st.number_input("VLM frame stride", min_value=1, max_value=500, value=10, step=1)
-            yolo_model = st.text_input("YOLO-World model", value="yolov8s-worldv2.pt")
-            yolo_conf = st.number_input("YOLO confidence", min_value=0.0, max_value=1.0, value=0.3, step=0.01)
-            yolo_iou = st.number_input("YOLO IOU threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
-            yolo_frame_stride = st.number_input("YOLO frame stride", min_value=1, max_value=200, value=1, step=1)
+            vlm_endpoint = st.text_input(
+                "VLM endpoint",
+                value=_cfg_str(defaults_cfg, "vlm_endpoint", "http://localhost:8000/v1/chat/completions"),
+            )
+            yolo_device = st.text_input("Detector device", value=_cfg_str(defaults_cfg, "yoloworld_device", "cuda"))
+            target_fps = st.number_input(
+                "Target FPS",
+                min_value=1.0,
+                max_value=120.0,
+                value=float(_cfg_float(defaults_cfg, "target_fps", 10.0)),
+                step=1.0,
+            )
+            vlm_frame_stride = st.number_input(
+                "VLM frame stride",
+                min_value=1,
+                max_value=500,
+                value=int(_cfg_int(defaults_cfg, "vlm_frame_stride", 10)),
+                step=1,
+            )
+            yolo_model = st.text_input(
+                "YOLO-World model",
+                value=_cfg_str(defaults_cfg, "yoloworld_model", "yolov8s-worldv2.pt"),
+            )
+            yolo_conf = st.number_input(
+                "YOLO confidence",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(_cfg_float(defaults_cfg, "yoloworld_confidence", 0.3)),
+                step=0.01,
+            )
+            yolo_iou = st.number_input(
+                "YOLO IOU threshold",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(_cfg_float(defaults_cfg, "yoloworld_iou_threshold", 0.7)),
+                step=0.01,
+            )
+            yolo_frame_stride = st.number_input(
+                "YOLO frame stride",
+                min_value=1,
+                max_value=200,
+                value=int(_cfg_int(defaults_cfg, "yoloworld_frame_stride", 1)),
+                step=1,
+            )
         with a2:
-            vlm_prompt = st.text_area("VLM prompt", value=DEFAULT_VLM_PROMPT, height=96)
+            vlm_prompt = st.text_area(
+                "VLM prompt",
+                value=_cfg_str(defaults_cfg, "vlm_prompt", DEFAULT_VLM_PROMPT),
+                height=96,
+            )
+            scene_default = _cfg_str(defaults_cfg, "scene_profile", SCENE_PROFILE_AUTO)
+            scene_options = [SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN]
+            scene_index = scene_options.index(scene_default) if scene_default in scene_options else 0
             scene_profile = st.selectbox(
                 "Scene profile",
-                options=[SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN],
-                index=0,
+                options=scene_options,
+                index=scene_index,
             )
-            semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
-            semantic_model = st.text_input("Semantic model (optional)", value="")
-            show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
-            log_progress = st.checkbox("Log progress", value=True)
+            semantic_default = _cfg_str(defaults_cfg, "semantic_index_embedder", "hashing")
+            semantic_options = ["hashing", "sentence-transformer"]
+            semantic_index = semantic_options.index(semantic_default) if semantic_default in semantic_options else 0
+            semantic_embedder = st.selectbox(
+                "Semantic embedder",
+                options=semantic_options,
+                index=semantic_index,
+            )
+            semantic_model = st.text_input(
+                "Semantic model (optional)",
+                value=_cfg_str(defaults_cfg, "semantic_index_model", ""),
+            )
+            show_full_phase_outputs = st.checkbox(
+                "Include full phase outputs",
+                value=_cfg_bool(defaults_cfg, "show_full_phase_outputs", False),
+            )
+            log_progress = st.checkbox(
+                "Log progress",
+                value=_cfg_bool(defaults_cfg, "log_progress", True),
+            )
 
     # Defaults used in autopilot mode.
     if "semantic_embedder" not in locals():
@@ -797,29 +904,29 @@ def _render_pipeline_runner() -> None:
     if "semantic_model" not in locals():
         semantic_model = ""
     if "show_full_phase_outputs" not in locals():
-        show_full_phase_outputs = False
+        show_full_phase_outputs = _cfg_bool(defaults_cfg, "show_full_phase_outputs", False)
     if "log_progress" not in locals():
-        log_progress = True
+        log_progress = _cfg_bool(defaults_cfg, "log_progress", True)
     if "scene_profile" not in locals():
-        scene_profile = SCENE_PROFILE_AUTO
+        scene_profile = _cfg_str(defaults_cfg, "scene_profile", SCENE_PROFILE_AUTO)
     if "vlm_endpoint" not in locals():
-        vlm_endpoint = "http://localhost:8000/v1/chat/completions"
+        vlm_endpoint = _cfg_str(defaults_cfg, "vlm_endpoint", "http://localhost:8000/v1/chat/completions")
     if "yolo_device" not in locals():
-        yolo_device = "cuda"
+        yolo_device = _cfg_str(defaults_cfg, "yoloworld_device", "cuda")
     if "target_fps" not in locals():
-        target_fps = 10.0
+        target_fps = _cfg_float(defaults_cfg, "target_fps", 10.0)
     if "vlm_frame_stride" not in locals():
-        vlm_frame_stride = 10
+        vlm_frame_stride = _cfg_int(defaults_cfg, "vlm_frame_stride", 10)
     if "vlm_prompt" not in locals():
-        vlm_prompt = DEFAULT_VLM_PROMPT
+        vlm_prompt = _cfg_str(defaults_cfg, "vlm_prompt", DEFAULT_VLM_PROMPT)
     if "yolo_model" not in locals():
-        yolo_model = "yolov8s-worldv2.pt"
+        yolo_model = _cfg_str(defaults_cfg, "yoloworld_model", "yolov8s-worldv2.pt")
     if "yolo_conf" not in locals():
-        yolo_conf = 0.3
+        yolo_conf = _cfg_float(defaults_cfg, "yoloworld_confidence", 0.3)
     if "yolo_iou" not in locals():
-        yolo_iou = 0.7
+        yolo_iou = _cfg_float(defaults_cfg, "yoloworld_iou_threshold", 0.7)
     if "yolo_frame_stride" not in locals():
-        yolo_frame_stride = 1
+        yolo_frame_stride = _cfg_int(defaults_cfg, "yoloworld_frame_stride", 1)
 
     video_stem = "video_run"
     if uploaded_video is not None and str(uploaded_video.name).strip():
@@ -856,38 +963,40 @@ def _render_pipeline_runner() -> None:
                 endpoint=str(vlm_endpoint),
                 model=str(vlm_model),
                 prompt=str(vlm_prompt),
-                max_tokens=120,
+                max_tokens=int(_cfg_int(defaults_cfg, "vlm_max_tokens", 120)),
                 frame_stride=int(vlm_frame_stride),
-                timeout_sec=60.0,
-                temperature=0.0,
+                timeout_sec=float(_cfg_float(defaults_cfg, "vlm_timeout_sec", 60.0)),
+                temperature=float(_cfg_float(defaults_cfg, "vlm_temperature", 0.0)),
                 api_key=None,
             )
             vlm_cfg.validate()
 
-            llm_vocab_cfg = LLMVocabPostprocessConfig(
-                endpoint=str(vlm_endpoint),
-                model=str(vlm_model),
-                max_tokens=500,
-                timeout_sec=60.0,
-                temperature=0.0,
-                api_key=None,
-                max_detection_terms=20,
-            )
-            llm_vocab_cfg.validate()
+            llm_vocab_cfg = None
+            if _cfg_bool(defaults_cfg, "llm_postprocess_vocab", True):
+                llm_vocab_cfg = LLMVocabPostprocessConfig(
+                    endpoint=str(vlm_endpoint),
+                    model=str(vlm_model),
+                    max_tokens=int(_cfg_int(defaults_cfg, "llm_postprocess_max_tokens", 500)),
+                    timeout_sec=float(_cfg_float(defaults_cfg, "llm_postprocess_timeout_sec", 60.0)),
+                    temperature=float(_cfg_float(defaults_cfg, "llm_postprocess_temperature", 0.0)),
+                    api_key=None,
+                    max_detection_terms=int(_cfg_int(defaults_cfg, "llm_postprocess_max_detection_terms", 20)),
+                )
+                llm_vocab_cfg.validate()
 
             detection_tracking_cfg = DetectionTrackingConfig(
-                iou_threshold=0.3,
-                max_missed_frames=12,
-                min_detection_confidence=0.2,
-                class_aware=True,
+                iou_threshold=float(_cfg_float(defaults_cfg, "detect_track_iou_threshold", 0.3)),
+                max_missed_frames=int(_cfg_int(defaults_cfg, "detect_track_max_missed_frames", 12)),
+                min_detection_confidence=float(_cfg_float(defaults_cfg, "detect_track_min_confidence", 0.2)),
+                class_aware=not _cfg_bool(defaults_cfg, "detect_track_class_agnostic", False),
             )
             detection_tracking_cfg.validate()
 
             track_processing_cfg = TrackProcessingConfig(
-                min_confidence=0.0,
-                min_track_length_frames=3,
-                max_interp_gap_frames=1,
-                clip_bboxes_to_frame=True,
+                min_confidence=float(_cfg_float(defaults_cfg, "track_min_confidence", 0.0)),
+                min_track_length_frames=int(_cfg_int(defaults_cfg, "track_min_length", 3)),
+                max_interp_gap_frames=int(_cfg_int(defaults_cfg, "track_max_interp_gap", 1)),
+                clip_bboxes_to_frame=not _cfg_bool(defaults_cfg, "track_no_clip_bbox", False),
             )
             track_processing_cfg.validate()
 
@@ -912,10 +1021,10 @@ def _render_pipeline_runner() -> None:
                     llm_vocab_postprocess_config=llm_vocab_cfg,
                     log_progress=bool(log_progress),
                     include_full_phase_outputs=bool(show_full_phase_outputs),
-                    phase_preview_limit=25,
+                    phase_preview_limit=int(_cfg_int(defaults_cfg, "phase_preview_limit", 25)),
                     semantic_index_embedder=semantic_embedder,
                     semantic_index_model=(semantic_model.strip() or None),
-                    enable_semantic_index=True,
+                    enable_semantic_index=not _cfg_bool(defaults_cfg, "disable_semantic_index", False),
                 )
 
             st.session_state["last_summary"] = summary

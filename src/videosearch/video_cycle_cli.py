@@ -20,6 +20,8 @@ from .video_cycle import (
     video_fps,
 )
 
+DEFAULT_CLI_CONFIG_PATH = Path("config/video_cycle.defaults.json")
+
 
 def _parse_seed_labels(value: Any) -> list[str] | None:
     if value is None:
@@ -85,11 +87,27 @@ def _apply_config_defaults(
             continue
         defaults[dest] = action.default
 
+    input_source_dests = {
+        "tracks",
+        "bytetrack_txt",
+        "detections",
+        "auto_detections_groundingdino",
+        "auto_detections_yoloworld",
+    }
+    explicit_input_source = any(getattr(args, dest) != defaults.get(dest) for dest in input_source_dests)
+
+    caption_dests = {"captions", "auto_captions"}
+    explicit_caption_source = any(getattr(args, dest) != defaults.get(dest) for dest in caption_dests)
+
     for dest, value in config.items():
         if not hasattr(args, dest):
             continue
         current = getattr(args, dest)
         default = defaults.get(dest)
+        if explicit_input_source and dest in input_source_dests and current == default:
+            continue
+        if explicit_caption_source and dest in caption_dests and current == default:
+            continue
         if current == default:
             setattr(args, dest, value)
     return args
@@ -102,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON config with default CLI values (CLI flags still take priority)",
     )
-    parser.add_argument("--video", required=True, help="Input video path")
+    parser.add_argument("--video", default=None, help="Input video path")
     parser.add_argument("--tracks", default=None, help="Tracking output JSON path")
     parser.add_argument("--bytetrack-txt", default=None, help="ByteTrack MOT txt path")
     parser.add_argument(
@@ -282,8 +300,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
-    cli_config = _load_cli_config(getattr(args, "config", None))
+    config_path = getattr(args, "config", None)
+    if not config_path and DEFAULT_CLI_CONFIG_PATH.exists():
+        config_path = str(DEFAULT_CLI_CONFIG_PATH)
+    cli_config = _load_cli_config(config_path)
     args = _apply_config_defaults(args=args, parser=parser, config=cli_config)
+
+    if not args.video:
+        raise ValueError("Missing required --video (or set `video` in config file)")
 
     if args.captions and args.auto_captions:
         raise ValueError("Use either --captions or --auto-captions, not both")
