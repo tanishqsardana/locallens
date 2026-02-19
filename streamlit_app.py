@@ -361,19 +361,6 @@ def _render_pipeline_runner() -> None:
     out_dir_text = str((Path("data/video_runs") / video_stem).resolve())
     st.caption(f"Output directory (auto): `{out_dir_text}`")
 
-    summary_for_db = st.session_state.get("last_summary")
-    default_db_path = str(_expand_path(out_dir_text) / "moment_index.sqlite")
-    if isinstance(summary_for_db, Mapping):
-        db_text = summary_for_db.get("moment_index_db")
-        if isinstance(db_text, str) and db_text.strip():
-            default_db_path = str(_expand_path(db_text))
-    semantic_db_path_text = st.text_input(
-        "Semantic index DB path",
-        value=default_db_path,
-        key="runner_semantic_db_path",
-    )
-    _render_semantic_query_panel(_expand_path(semantic_db_path_text), key_prefix="runner")
-
     run_clicked = st.button("Run Full Pipeline", type="primary")
     if run_clicked:
         try:
@@ -481,6 +468,20 @@ def _render_pipeline_runner() -> None:
             if payload is not None:
                 st.markdown("### Phase Outputs")
                 _render_phase_payload(payload)
+
+    st.markdown("### Semantic Query")
+    summary_for_db = st.session_state.get("last_summary")
+    default_db_path = str(_expand_path(out_dir_text) / "moment_index.sqlite")
+    if isinstance(summary_for_db, Mapping):
+        db_text = summary_for_db.get("moment_index_db")
+        if isinstance(db_text, str) and db_text.strip():
+            default_db_path = str(_expand_path(db_text))
+    semantic_db_path_text = st.text_input(
+        "Semantic index DB path",
+        value=default_db_path,
+        key="runner_semantic_db_path",
+    )
+    _render_semantic_query_panel(_expand_path(semantic_db_path_text), key_prefix="runner")
 
 
 def _render_cycle_inspector() -> None:
