@@ -740,8 +740,6 @@ def _render_pipeline_runner() -> None:
     c1, c2 = st.columns(2)
     with c1:
         vlm_model = st.text_input("VLM model", value="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4")
-    with c2:
-        st.caption("Use Advanced for runtime controls.")
 
     with st.expander("Advanced (optional)", expanded=False):
         a1, a2 = st.columns(2)
@@ -764,7 +762,6 @@ def _render_pipeline_runner() -> None:
             semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
             semantic_model = st.text_input("Semantic model (optional)", value="")
             show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
-            phase_preview_limit = st.number_input("Phase preview limit", min_value=1, max_value=2000, value=25, step=1)
             log_progress = st.checkbox("Log progress", value=True)
 
     # Defaults used in autopilot mode.
@@ -774,8 +771,6 @@ def _render_pipeline_runner() -> None:
         semantic_model = ""
     if "show_full_phase_outputs" not in locals():
         show_full_phase_outputs = False
-    if "phase_preview_limit" not in locals():
-        phase_preview_limit = 25
     if "log_progress" not in locals():
         log_progress = True
     if "scene_profile" not in locals():
@@ -890,7 +885,7 @@ def _render_pipeline_runner() -> None:
                     llm_vocab_postprocess_config=llm_vocab_cfg,
                     log_progress=bool(log_progress),
                     include_full_phase_outputs=bool(show_full_phase_outputs),
-                    phase_preview_limit=int(phase_preview_limit),
+                    phase_preview_limit=25,
                     semantic_index_embedder=semantic_embedder,
                     semantic_index_model=(semantic_model.strip() or None),
                     enable_semantic_index=True,
@@ -906,14 +901,6 @@ def _render_pipeline_runner() -> None:
 
     summary = st.session_state.get("last_summary")
     show_phase_outputs_runner = st.checkbox("Show phase outputs", value=False, key="runner_show_phase_outputs")
-    phase_preview_limit_ui = st.number_input(
-        "Phase table preview rows",
-        min_value=25,
-        max_value=2000,
-        value=300,
-        step=25,
-        key="runner_phase_preview_rows",
-    )
     if isinstance(summary, Mapping) and bool(show_phase_outputs_runner):
         phase_path_text = summary.get("phase_outputs")
         if isinstance(phase_path_text, str):
@@ -921,7 +908,7 @@ def _render_pipeline_runner() -> None:
             payload = _safe_json_read(phase_path)
             if payload is not None:
                 st.markdown("### Phase Outputs")
-                _render_phase_payload(payload, preview_limit=int(phase_preview_limit_ui))
+                _render_phase_payload(payload, preview_limit=300)
 
     st.markdown("### Semantic Query")
     resolved_db_path = _resolve_runner_index_db()
@@ -972,16 +959,8 @@ def _render_cycle_inspector() -> None:
         value=False,
         key="inspector_show_phase_outputs",
     )
-    phase_preview_limit_inspector = st.number_input(
-        "Phase table preview rows",
-        min_value=25,
-        max_value=2000,
-        value=300,
-        step=25,
-        key="inspector_phase_preview_rows",
-    )
     if bool(show_phase_outputs_inspector):
-        _render_phase_payload(payload, preview_limit=int(phase_preview_limit_inspector))
+        _render_phase_payload(payload, preview_limit=300)
 
 
 def _load_sample() -> dict[str, Any]:
