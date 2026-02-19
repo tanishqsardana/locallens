@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 import streamlit as st
@@ -99,6 +100,138 @@ def _render_image_grid(rows: list[dict[str, Any]], limit: int = 12) -> None:
             st.image(img_path, caption=caption, use_container_width=True)
 
 
+def _ensure_cv2() -> Any:
+    try:
+        import cv2  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "opencv-python-headless is required to generate query clips. "
+            "Install with: pip install -e '.[video]'"
+        ) from exc
+    return cv2
+
+
+def _slug(text: str, *, max_len: int = 48) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", "-", text.strip().lower())
+    cleaned = cleaned.strip("-")
+    if not cleaned:
+        cleaned = "query"
+    return cleaned[:max_len]
+
+
+def _resolve_video_path_for_db(db_path: Path) -> Path | None:
+    run_dir = db_path.parent
+    summary_path = run_dir / "run_summary.json"
+    summary = _safe_summary_read(summary_path)
+    if isinstance(summary, Mapping):
+        manifest_path = summary.get("video_manifest")
+        if isinstance(manifest_path, str) and manifest_path.strip():
+            manifest_file = _expand_path(manifest_path)
+            payload = _safe_json_read(manifest_file)
+            if isinstance(payload, Mapping):
+                video_path = payload.get("video_path")
+                if isinstance(video_path, str) and video_path.strip():
+                    candidate = _expand_path(video_path)
+                    if candidate.exists():
+                        return candidate
+    fallback_manifest = run_dir / "ingest" / "video_manifest.json"
+    payload = _safe_json_read(fallback_manifest)
+    if isinstance(payload, Mapping):
+        video_path = payload.get("video_path")
+        if isinstance(video_path, str) and video_path.strip():
+            candidate = _expand_path(video_path)
+            if candidate.exists():
+                return candidate
+    return None
+
+
+def _export_query_clip(
+    *,
+    video_path: Path,
+    start_time: float,
+    end_time: float,
+    output_path: Path,
+    padding_sec: float = 0.5,
+) -> Path:
+    cv2 = _ensure_cv2()
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    if fps <= 0:
+        fps = 30.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    duration = (frame_count / fps) if frame_count > 0 else 0.0
+
+    start_sec = max(0.0, float(start_time) - float(padding_sec))
+    end_sec = min(duration, float(end_time) + float(padding_sec)) if duration > 0 else float(end_time) + float(padding_sec)
+    if end_sec <= start_sec:
+        end_sec = start_sec + max(0.6, 2.0 / fps)
+
+    start_frame = max(0, int(start_sec * fps))
+    end_frame = max(start_frame, int(end_sec * fps))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+    if not writer.isOpened():
+        cap.release()
+        raise RuntimeError(f"Could not open clip writer: {output_path}")
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    frame_idx = start_frame
+    while frame_idx <= end_frame:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        writer.write(frame)
+        frame_idx += 1
+
+    writer.release()
+    cap.release()
+    return output_path
+
+
+def _build_query_clips(
+    *,
+    db_path: Path,
+    query: str,
+    top_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    run_dir = db_path.parent
+    video_path = _resolve_video_path_for_db(db_path)
+    if video_path is None:
+        raise RuntimeError("Could not resolve source video path from run artifacts")
+
+    query_dir = run_dir / "query_clips" / _slug(query)
+    out: list[dict[str, Any]] = []
+    for rank, row in enumerate(top_results, start=1):
+        moment_index = int(row.get("moment_index", -1))
+        start_time = float(row.get("start_time", 0.0))
+        end_time = float(row.get("end_time", start_time))
+        clip_path = query_dir / f"rank_{rank:02d}_moment_{moment_index:05d}.mp4"
+        _export_query_clip(
+            video_path=video_path,
+            start_time=start_time,
+            end_time=end_time,
+            output_path=clip_path,
+            padding_sec=0.5,
+        )
+        out.append(
+            {
+                "rank": rank,
+                "moment_index": moment_index,
+                "start_time": start_time,
+                "end_time": end_time,
+                "clip_path": str(clip_path),
+            }
+        )
+    return out
+
+
 def _find_latest_index_db(base_dir: Path) -> Path | None:
     root = base_dir.expanduser().resolve()
     if not root.exists():
@@ -155,6 +288,7 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
             results = semantic_search_moments(db_path=str(db_path), query=query, top_k=3)
             st.session_state[f"{key_prefix}_query_results"] = results[:3]
             st.session_state[f"{key_prefix}_query_last"] = query
+            st.session_state[f"{key_prefix}_query_clips"] = []
         except Exception as exc:
             st.error(f"Semantic search failed: {exc}")
 
@@ -205,6 +339,52 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
     if keyframe_rows:
         st.write("Keyframe previews for top 3 results:")
         _render_image_grid(keyframe_rows, limit=9)
+
+    st.markdown("#### Top 3 Moment Clips")
+    current_query = st.session_state.get(f"{key_prefix}_query_last")
+    if not isinstance(current_query, str) or not current_query.strip():
+        current_query = query
+    generate_clicked = st.button("Generate Top 3 Clips", key=f"{key_prefix}_generate_top3_clips")
+    if generate_clicked:
+        try:
+            clip_rows = _build_query_clips(
+                db_path=db_path,
+                query=current_query,
+                top_results=[dict(row) for row in top_results],
+            )
+            st.session_state[f"{key_prefix}_query_clips"] = clip_rows
+        except Exception as exc:
+            st.error(f"Clip generation failed: {exc}")
+
+    clip_rows = st.session_state.get(f"{key_prefix}_query_clips", [])
+    if isinstance(clip_rows, list) and clip_rows:
+        for row in clip_rows:
+            if not isinstance(row, Mapping):
+                continue
+            clip_path = row.get("clip_path")
+            if not isinstance(clip_path, str):
+                continue
+            path = Path(clip_path)
+            if not path.exists():
+                continue
+            try:
+                start_t = float(row.get("start_time", 0.0))
+                end_t = float(row.get("end_time", 0.0))
+            except Exception:
+                start_t = 0.0
+                end_t = 0.0
+            st.write(
+                f"rank={row.get('rank')} moment={row.get('moment_index')} "
+                f"time={start_t:.3f}s -> {end_t:.3f}s"
+            )
+            st.video(str(path))
+            st.download_button(
+                f"Download clip (rank {row.get('rank')})",
+                data=path.read_bytes(),
+                file_name=path.name,
+                mime="video/mp4",
+                key=f"{key_prefix}_clip_download_{row.get('rank')}_{row.get('moment_index')}",
+            )
 
 
 def _render_phase_payload(payload: Mapping[str, Any]) -> None:
