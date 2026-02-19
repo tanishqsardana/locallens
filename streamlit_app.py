@@ -684,6 +684,7 @@ def _render_phase_payload(payload: Mapping[str, Any], *, preview_limit: int = 30
         st.write(f"Captions count: `{p2.get('captions_count', 0)}`")
         caption_rows = _preview_rows(_as_rows(p2.get("caption_rows")), limit=preview_limit)
         if caption_rows:
+            caption_rows = [{k: v for k, v in row.items() if k != "error"} for row in caption_rows]
             st.write("Caption rows:")
             st.dataframe(caption_rows, width="stretch")
             st.write("VLM sampled frame previews:")
