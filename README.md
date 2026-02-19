@@ -151,6 +151,17 @@ PYTHONPATH=src python -m videosearch.video_cycle_cli \
   --show-phase-outputs
 ```
 
+Use a JSON config file for default hyperparameters (CLI flags still override):
+
+```bash
+PYTHONPATH=src python -m videosearch.video_cycle_cli \
+  --config config/video_cycle.defaults.json \
+  --video /path/to/video.mp4 \
+  --show-phase-outputs
+```
+
+Example config template: `config/video_cycle.defaults.json`
+
 Or run tracking in-pipeline from frame-level detections:
 
 ```bash

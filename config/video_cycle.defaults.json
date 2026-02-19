@@ -1,0 +1,29 @@
+{
+  "video_cycle": {
+    "scene_profile": "pedestrian",
+    "out_dir": "data/video_cycle_run",
+    "target_fps": 10.0,
+    "auto_captions": true,
+    "vlm_endpoint": "http://localhost:8000/v1/chat/completions",
+    "vlm_model": "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4",
+    "vlm_prompt": "List visible objects and scene elements as a comma-separated list of singular nouns, lowercase, no adjectives/colors/verbs/locations, no duplicates, max 20 terms.",
+    "vlm_max_tokens": 120,
+    "vlm_frame_stride": 10,
+    "llm_postprocess_vocab": true,
+    "llm_postprocess_max_detection_terms": 20,
+    "auto_detections_yoloworld": true,
+    "yoloworld_model": "yolov8s-worldv2.pt",
+    "yoloworld_confidence": 0.3,
+    "yoloworld_iou_threshold": 0.7,
+    "yoloworld_device": "cuda",
+    "detect_track_iou_threshold": 0.3,
+    "detect_track_max_missed_frames": 12,
+    "detect_track_min_confidence": 0.2,
+    "track_min_confidence": 0.0,
+    "track_min_length": 3,
+    "track_max_interp_gap": 1,
+    "semantic_index_embedder": "hashing",
+    "log_progress": true,
+    "show_phase_outputs": true
+  }
+}

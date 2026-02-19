@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
 from .video_cycle import (
     DetectionTrackingConfig,
@@ -20,17 +21,26 @@ from .video_cycle import (
 )
 
 
-def _parse_seed_labels(value: str | None) -> list[str] | None:
+def _parse_seed_labels(value: Any) -> list[str] | None:
     if value is None:
         return None
+    if isinstance(value, list):
+        out = [str(item).strip() for item in value if str(item).strip()]
+        return out
+    if not isinstance(value, str):
+        raise ValueError("seed_labels must be a comma-separated string or list of strings")
     if not value.strip():
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _parse_label_list(value: str | None) -> list[str] | None:
+def _parse_label_list(value: Any) -> list[str] | None:
     if value is None:
         return None
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, str):
+        raise ValueError("moment_labels must be a comma-separated string or list of strings")
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
@@ -43,8 +53,55 @@ def _load_moment_overrides(path: str | None) -> dict[str, object] | None:
     return raw
 
 
+def _load_cli_config(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("CLI config must be a JSON object")
+    payload = raw.get("video_cycle")
+    if isinstance(payload, dict):
+        raw = payload
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str):
+            continue
+        out[key.strip().replace("-", "_")] = value
+    return out
+
+
+def _apply_config_defaults(
+    *,
+    args: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    config: dict[str, Any],
+) -> argparse.Namespace:
+    if not config:
+        return args
+    defaults: dict[str, Any] = {}
+    for action in parser._actions:
+        dest = getattr(action, "dest", None)
+        if not dest:
+            continue
+        defaults[dest] = action.default
+
+    for dest, value in config.items():
+        if not hasattr(args, dest):
+            continue
+        current = getattr(args, dest)
+        default = defaults.get(dest)
+        if current == default:
+            setattr(args, dest, value)
+    return args
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run end-to-end video moment generation cycle")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Optional JSON config with default CLI values (CLI flags still take priority)",
+    )
     parser.add_argument("--video", required=True, help="Input video path")
     parser.add_argument("--tracks", default=None, help="Tracking output JSON path")
     parser.add_argument("--bytetrack-txt", default=None, help="ByteTrack MOT txt path")
@@ -223,7 +280,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    cli_config = _load_cli_config(getattr(args, "config", None))
+    args = _apply_config_defaults(args=args, parser=parser, config=cli_config)
+
     if args.captions and args.auto_captions:
         raise ValueError("Use either --captions or --auto-captions, not both")
     input_count = (
@@ -334,6 +395,13 @@ def main() -> int:
         )
         llm_vocab_config.validate()
 
+    config_moment_overrides = cli_config.get("moment_overrides")
+    if config_moment_overrides is not None and not isinstance(config_moment_overrides, dict):
+        raise ValueError("moment_overrides in --config must be a JSON object")
+    moment_overrides = _load_moment_overrides(args.moment_config)
+    if moment_overrides is None and isinstance(config_moment_overrides, dict):
+        moment_overrides = dict(config_moment_overrides)
+
     summary = run_video_cycle(
         video_path=args.video,
         tracks_path=tracks_path,
@@ -355,7 +423,7 @@ def main() -> int:
         moment_label_allowlist=_parse_label_list(args.moment_labels),
         scene_profile=str(args.scene_profile),
         target_fps=args.target_fps,
-        moment_overrides=_load_moment_overrides(args.moment_config),
+        moment_overrides=moment_overrides,
         track_processing_config=track_config,
         include_full_phase_outputs=bool(args.show_full_phase_outputs),
         phase_preview_limit=int(args.phase_preview_limit),
