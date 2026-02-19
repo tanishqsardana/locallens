@@ -37,16 +37,42 @@ def _label_match(moment: Mapping[str, Any], label: str) -> bool:
     return False
 
 
+def _color_match(moment: Mapping[str, Any], color: str | None) -> bool:
+    if color is None:
+        return True
+    target = color.strip().lower()
+    if not target:
+        return True
+    metadata = moment.get("metadata", {})
+    if not isinstance(metadata, Mapping):
+        return False
+    color_tags = metadata.get("color_tags")
+    if isinstance(color_tags, list):
+        normalized = {str(item).strip().lower() for item in color_tags if str(item).strip()}
+        if target in normalized:
+            return True
+    color_label_tags = metadata.get("color_label_tags")
+    if isinstance(color_label_tags, list):
+        for item in color_label_tags:
+            tag = str(item).strip().lower()
+            if tag.startswith(f"{target} "):
+                return True
+    return False
+
+
 def when_object_appears(
     moments: Sequence[Mapping[str, Any]],
     *,
     label: str,
+    color: str | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in moments:
         if str(row.get("type", "")).upper() != "APPEAR":
             continue
         if not _label_match(row, label):
+            continue
+        if not _color_match(row, color):
             continue
         out.append(
             {
@@ -336,6 +362,7 @@ def pass_through_tracks(
 
 
 _KNOWN_LABELS = ("car", "truck", "bus", "van", "person", "motorcycle")
+_KNOWN_COLORS = ("white", "black", "red", "blue", "green", "yellow", "orange", "brown", "gray", "grey", "silver", "gold")
 
 
 def _infer_label(query: str) -> str | None:
@@ -343,6 +370,14 @@ def _infer_label(query: str) -> str | None:
     for label in _KNOWN_LABELS:
         if re.search(rf"\b{re.escape(label)}s?\b", q):
             return label
+    return None
+
+
+def _infer_color(query: str) -> str | None:
+    q = query.lower()
+    for color in _KNOWN_COLORS:
+        if re.search(rf"\b{re.escape(color)}\b", q):
+            return "gray" if color == "grey" else color
     return None
 
 
@@ -357,11 +392,12 @@ def answer_nlq(
 ) -> dict[str, Any]:
     q = query.strip().lower()
     label = _infer_label(q)
+    color = _infer_color(q)
     if label is None:
         return {"intent": "unknown", "error": "Could not infer label from query"}
 
     if "appear" in q:
-        appear_rows = when_object_appears(moments, label=label)
+        appear_rows = when_object_appears(moments, label=label, color=color)
         episodes = appearance_episodes(
             tracks,
             label=label,
@@ -369,9 +405,22 @@ def answer_nlq(
             min_episode_frames=2,
             per_track=per_track_episodes,
         )
+        if color is not None:
+            allowed_track_ids: set[Any] = set()
+            for row in appear_rows:
+                entities = row.get("entities", [])
+                if isinstance(entities, list):
+                    for entity in entities:
+                        allowed_track_ids.add(_to_simple_track_id(entity))
+            episodes = [
+                row
+                for row in episodes
+                if any(_to_simple_track_id(track_id) in allowed_track_ids for track_id in row.get("track_ids", []))
+            ]
         return {
             "intent": "appear",
             "label": label,
+            "color": color,
             "results": appear_rows,
             "episodes": episodes,
         }

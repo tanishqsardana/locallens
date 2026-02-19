@@ -9,6 +9,7 @@ from videosearch.video_cycle import (
     TrackProcessingConfig,
     VideoManifest,
     YOLOWorldConfig,
+    attach_vlm_color_tags_to_moments,
     build_moment_label_allowlist,
     build_phase_outputs,
     build_keyframe_targets,
@@ -16,6 +17,7 @@ from videosearch.video_cycle import (
     build_prompt_terms,
     build_vocab_postprocess_prompt,
     convert_bytetrack_mot_rows,
+    extract_caption_color_tags,
     extract_chat_completion_text,
     extract_object_nouns,
     normalize_detection_rows,
@@ -331,6 +333,45 @@ class VideoCycleHelpersTest(unittest.TestCase):
         self.assertEqual(parsed["detection_terms"], ["car", "truck", "billboard"])
         self.assertIn("highway", parsed["scene_terms"])
         self.assertEqual(parsed["canonical_map"]["cars"], "car")
+
+    def test_extract_caption_color_tags(self) -> None:
+        tags = extract_caption_color_tags(
+            "A white car follows a red truck on the highway.",
+            known_labels=["car", "truck"],
+            synonym_map={},
+        )
+        self.assertIn("white", tags["color_tags"])
+        self.assertIn("red", tags["color_tags"])
+        self.assertIn("white car", tags["color_label_tags"])
+        self.assertIn("red truck", tags["color_label_tags"])
+
+    def test_attach_vlm_color_tags_to_moments(self) -> None:
+        moments = [
+            {
+                "moment_index": 0,
+                "video_id": "v1",
+                "type": "APPEAR",
+                "start_time": 10.0,
+                "end_time": 10.0,
+                "entities": [7],
+                "metadata": {"label": "car", "label_group": "car"},
+            }
+        ]
+        caption_rows = [
+            {"frame_idx": 100, "time_sec": 10.1, "caption": "A white car appears ahead."},
+            {"frame_idx": 120, "time_sec": 12.0, "caption": "Road is clear."},
+        ]
+        enriched = attach_vlm_color_tags_to_moments(
+            moments,
+            caption_rows,
+            known_labels=["car", "truck"],
+            synonym_map={},
+            pad_sec=0.5,
+        )
+        self.assertEqual(len(enriched), 1)
+        metadata = enriched[0]["metadata"]
+        self.assertIn("white", metadata.get("color_tags", []))
+        self.assertIn("white car", metadata.get("color_label_tags", []))
 
 
 if __name__ == "__main__":

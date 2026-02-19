@@ -21,7 +21,7 @@ class MomentQueryTest(unittest.TestCase):
                 "start_time": 1.0,
                 "end_time": 1.0,
                 "entities": [7],
-                "metadata": {"label": "truck", "label_group": "truck"},
+                "metadata": {"label": "truck", "label_group": "truck", "color_tags": ["white"]},
             },
             {
                 "moment_index": 1,
@@ -29,13 +29,17 @@ class MomentQueryTest(unittest.TestCase):
                 "start_time": 2.0,
                 "end_time": 2.0,
                 "entities": [8],
-                "metadata": {"label": "car", "label_group": "car"},
+                "metadata": {"label": "car", "label_group": "car", "color_tags": ["red"]},
             },
         ]
         out = when_object_appears(moments, label="truck")
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["time_sec"], 1.0)
         self.assertEqual(out[0]["entities"], [7])
+        out_white = when_object_appears(moments, label="truck", color="white")
+        self.assertEqual(len(out_white), 1)
+        out_red = when_object_appears(moments, label="truck", color="red")
+        self.assertEqual(len(out_red), 0)
 
     def test_frames_with_label(self) -> None:
         tracks = [
@@ -105,7 +109,7 @@ class MomentQueryTest(unittest.TestCase):
                 "start_time": 3.0,
                 "end_time": 3.0,
                 "entities": [2],
-                "metadata": {"label": "truck", "label_group": "truck"},
+                "metadata": {"label": "truck", "label_group": "truck", "color_tags": ["white"]},
             }
         ]
         tracks = [
@@ -121,6 +125,31 @@ class MomentQueryTest(unittest.TestCase):
         self.assertEqual(out["intent"], "appear")
         self.assertEqual(len(out["results"]), 1)
         self.assertIn("episodes", out)
+
+    def test_answer_nlq_with_color(self) -> None:
+        moments = [
+            {
+                "moment_index": 0,
+                "type": "APPEAR",
+                "start_time": 3.0,
+                "end_time": 3.0,
+                "entities": [2],
+                "metadata": {"label": "truck", "label_group": "truck", "color_tags": ["white"]},
+            }
+        ]
+        tracks = [
+            {"track_id": 2, "class": "truck", "bbox": [10, 10, 20, 20], "frame_idx": 30, "time_sec": 3.0}
+        ]
+        out = answer_nlq(
+            "when does white truck appear?",
+            moments=moments,
+            tracks=tracks,
+            frame_width=100,
+            frame_height=100,
+        )
+        self.assertEqual(out["intent"], "appear")
+        self.assertEqual(out.get("color"), "white")
+        self.assertEqual(len(out["results"]), 1)
 
 
 if __name__ == "__main__":

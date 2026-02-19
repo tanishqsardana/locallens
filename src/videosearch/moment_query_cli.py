@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     appear = sub.add_parser("appear", help="When does a label appear?")
     appear.add_argument("--label", required=True)
+    appear.add_argument("--color", default=None, help="Optional color tag filter (e.g., white, red)")
     appear.add_argument("--moments", default=None)
     appear.add_argument("--tracks", default=None)
     appear.add_argument("--max-gap-frames", type=int, default=2)
@@ -78,16 +79,43 @@ def main() -> int:
     if args.command == "appear":
         moments = load_rows(_resolve(run_dir, args.moments, "moments.json"))
         tracks = load_rows(_resolve(run_dir, args.tracks, "normalized_tracks.json"))
+        color = args.color.strip().lower() if isinstance(args.color, str) and args.color.strip() else None
+        appear_events = when_object_appears(
+            moments,
+            label=args.label,
+            color=color,
+        )
+        episodes = appearance_episodes(
+            tracks,
+            label=args.label,
+            max_gap_frames=int(args.max_gap_frames),
+            min_episode_frames=int(args.min_episode_frames),
+            per_track=not bool(args.label_union_episodes),
+        )
+        if color is not None:
+            allowed_track_ids: set[int | str] = set()
+            for row in appear_events:
+                entities = row.get("entities", [])
+                if isinstance(entities, list):
+                    for entity in entities:
+                        try:
+                            allowed_track_ids.add(int(entity))
+                        except Exception:
+                            allowed_track_ids.add(str(entity))
+            episodes = [
+                row
+                for row in episodes
+                if any(
+                    (int(track_id) if isinstance(track_id, (int, float, str)) and str(track_id).isdigit() else str(track_id))
+                    in allowed_track_ids
+                    for track_id in row.get("track_ids", [])
+                )
+            ]
         payload = {
             "label": args.label.strip().lower(),
-            "appear_events": when_object_appears(moments, label=args.label),
-            "episodes": appearance_episodes(
-                tracks,
-                label=args.label,
-                max_gap_frames=int(args.max_gap_frames),
-                min_episode_frames=int(args.min_episode_frames),
-                per_track=not bool(args.label_union_episodes),
-            ),
+            "color": color,
+            "appear_events": appear_events,
+            "episodes": episodes,
         }
         print(json.dumps(payload, indent=2, ensure_ascii=True))
         return 0

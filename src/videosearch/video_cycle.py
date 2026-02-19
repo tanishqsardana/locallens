@@ -50,6 +50,20 @@ DEFAULT_MOMENT_LABEL_ALLOWLIST = (
     "person",
     "motorcycle",
 )
+KNOWN_COLOR_TERMS = (
+    "white",
+    "black",
+    "red",
+    "blue",
+    "green",
+    "yellow",
+    "orange",
+    "brown",
+    "gray",
+    "grey",
+    "silver",
+    "gold",
+)
 
 
 @dataclass(slots=True)
@@ -637,6 +651,125 @@ def load_captions(path: str | Path) -> list[str]:
                     out.append(item["caption"])
             return out
     raise ValueError("Captions file must be a list of strings/objects or {captions: [...]}")
+
+
+def load_caption_rows(path: str | Path) -> list[dict[str, Any]]:
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    rows: list[dict[str, Any]] = []
+    source: list[Any]
+    if isinstance(raw, list):
+        source = raw
+    elif isinstance(raw, dict) and isinstance(raw.get("captions"), list):
+        source = list(raw.get("captions", []))
+    else:
+        return rows
+
+    for item in source:
+        if not isinstance(item, Mapping):
+            continue
+        caption = item.get("caption")
+        if not isinstance(caption, str) or not caption.strip():
+            continue
+        frame_idx = item.get("frame_idx", item.get("frame", item.get("frame_id", 0)))
+        time_sec = item.get("time_sec", item.get("timestamp", item.get("time", 0.0)))
+        try:
+            rows.append(
+                {
+                    "frame_idx": int(frame_idx),
+                    "time_sec": float(time_sec),
+                    "caption": caption.strip(),
+                }
+            )
+        except Exception:
+            continue
+    rows.sort(key=lambda row: (row["time_sec"], row["frame_idx"]))
+    return rows
+
+
+def extract_caption_color_tags(
+    caption: str,
+    *,
+    known_labels: Sequence[str] | None = None,
+    synonym_map: Mapping[str, str] | None = None,
+) -> dict[str, list[str]]:
+    terms = set(TOKEN_PATTERN.findall(caption.lower()))
+    colors = sorted({("gray" if color == "grey" else color) for color in KNOWN_COLOR_TERMS if color in terms})
+    if not colors:
+        return {"color_tags": [], "color_label_tags": []}
+
+    labels = [canonicalize_label(label, synonym_map or {}) for label in (known_labels or []) if str(label).strip()]
+    label_terms = set(labels)
+    color_label_tags: set[str] = set()
+    for color in colors:
+        for label in label_terms:
+            if not label:
+                continue
+            if re.search(rf"\b{re.escape(color)}\s+{re.escape(label)}s?\b", caption.lower()):
+                color_label_tags.add(f"{color} {label}")
+    return {"color_tags": colors, "color_label_tags": sorted(color_label_tags)}
+
+
+def attach_vlm_color_tags_to_moments(
+    moments: Sequence[Mapping[str, Any]],
+    caption_rows: Sequence[Mapping[str, Any]],
+    *,
+    known_labels: Sequence[str],
+    synonym_map: Mapping[str, str],
+    pad_sec: float = 0.75,
+) -> list[dict[str, Any]]:
+    if not moments:
+        return []
+    if not caption_rows:
+        return [dict(row) for row in moments]
+
+    prepared_captions: list[dict[str, Any]] = []
+    for row in caption_rows:
+        caption = row.get("caption")
+        if not isinstance(caption, str) or not caption.strip():
+            continue
+        try:
+            prepared_captions.append(
+                {
+                    "time_sec": float(row.get("time_sec", 0.0)),
+                    "caption": caption,
+                }
+            )
+        except Exception:
+            continue
+    prepared_captions.sort(key=lambda row: row["time_sec"])
+    if not prepared_captions:
+        return [dict(row) for row in moments]
+
+    out: list[dict[str, Any]] = []
+    for moment in moments:
+        start_time = float(moment.get("start_time", 0.0))
+        end_time = float(moment.get("end_time", start_time))
+        if end_time < start_time:
+            end_time = start_time
+        lower = start_time - float(pad_sec)
+        upper = end_time + float(pad_sec)
+        window = [row for row in prepared_captions if lower <= float(row["time_sec"]) <= upper]
+
+        color_tags: set[str] = set()
+        color_label_tags: set[str] = set()
+        for row in window:
+            tags = extract_caption_color_tags(
+                str(row["caption"]),
+                known_labels=known_labels,
+                synonym_map=synonym_map,
+            )
+            color_tags.update(tags.get("color_tags", []))
+            color_label_tags.update(tags.get("color_label_tags", []))
+
+        updated = dict(moment)
+        metadata = dict(updated.get("metadata", {})) if isinstance(updated.get("metadata"), Mapping) else {}
+        if color_tags:
+            metadata["color_tags"] = sorted(color_tags)
+        if color_label_tags:
+            metadata["color_label_tags"] = sorted(color_label_tags)
+        updated["metadata"] = metadata
+        out.append(updated)
+    return out
 
 
 def canonicalize_label(label: str, synonym_map: Mapping[str, str]) -> str:
@@ -1635,7 +1768,13 @@ def _format_semantic_moment_text(moment: Mapping[str, Any]) -> str:
         "TRAFFIC_CHANGE": "traffic density changes",
     }
     phrase = phrase_map.get(moment_type, f"{subject} {moment_type.lower()}")
-    return f"{phrase}; type={moment_type}; start={start_time:.3f}s; end={end_time:.3f}s"
+    color_tags = metadata.get("color_tags")
+    color_token = ""
+    if isinstance(color_tags, list):
+        colors = [str(item).strip().lower() for item in color_tags if str(item).strip()]
+        if colors:
+            color_token = f"; colors={','.join(sorted(set(colors)))}"
+    return f"{phrase}; type={moment_type}; start={start_time:.3f}s; end={end_time:.3f}s{color_token}"
 
 
 def build_moment_semantic_embeddings(
@@ -1817,6 +1956,18 @@ def _moment_type_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: item[0]))
 
 
+def _count_color_tagged_moments(rows: Sequence[Mapping[str, Any]]) -> int:
+    count = 0
+    for row in rows:
+        metadata = row.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            continue
+        color_tags = metadata.get("color_tags")
+        if isinstance(color_tags, list) and any(str(item).strip() for item in color_tags):
+            count += 1
+    return count
+
+
 def _embedding_preview(
     embeddings: Mapping[int, np.ndarray],
     *,
@@ -1927,6 +2078,7 @@ def build_phase_outputs(
         "phase_4_moments": {
             "moment_count": len(moment_rows),
             "moment_type_counts": _moment_type_counts(moment_rows),
+            "color_tagged_moment_count": _count_color_tagged_moments(moment_rows),
             "moments": _slice_for_report(
                 moment_rows,
                 include_full=include_full,
@@ -2027,6 +2179,7 @@ def run_video_cycle(
 
     if captions_path:
         captions = load_captions(captions_path)
+        caption_rows = load_caption_rows(captions_path)
         phase2_status = "provided_captions"
     elif vlm_caption_config:
         caption_rows = generate_vlm_captions(
@@ -2291,6 +2444,14 @@ def run_video_cycle(
     )
     _log_progress(log_progress, f"Phase 4 moments done: count={len(moments)}")
     moment_rows = moments_to_dicts(moments, video_id=manifest.video_id)
+    if caption_rows:
+        moment_rows = attach_vlm_color_tags_to_moments(
+            moment_rows,
+            caption_rows,
+            known_labels=allowed_moment_labels or list(DEFAULT_MOMENT_LABEL_ALLOWLIST),
+            synonym_map=synonym_map,
+            pad_sec=0.75,
+        )
     moments_path = out_dir / "moments.json"
     moments_path.write_text(json.dumps(moment_rows, indent=2, ensure_ascii=True), encoding="utf-8")
 

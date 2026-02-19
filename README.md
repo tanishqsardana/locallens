@@ -257,6 +257,10 @@ Pipeline artifacts:
 - `data/video_cycle_run/moment_index.sqlite`
 - `data/video_cycle_run/phase_outputs.json` (phase-by-phase debug payload)
 
+When captions are available, moment metadata can include VLM-derived color descriptors:
+- `metadata.color_tags` (e.g., `["white", "red"]`)
+- `metadata.color_label_tags` (e.g., `["white car"]`)
+
 For full untruncated phase payloads during development:
 
 ```bash
@@ -340,6 +344,15 @@ PYTHONPATH=src python -m videosearch.moment_query_cli appear \
 `appear` now returns:
 - `appear_events` (raw APPEAR moments per track)
 - `episodes` (track-instance windows from frame ranges, default per-track)
+
+Optional color filter (uses VLM-derived tags in moment metadata):
+
+```bash
+PYTHONPATH=src python -m videosearch.moment_query_cli appear \
+  --run-dir data/video_cycle_run \
+  --label truck \
+  --color white
+```
 
 ```bash
 PYTHONPATH=src python -m videosearch.moment_query_cli frames-with \
