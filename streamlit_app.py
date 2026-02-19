@@ -99,6 +99,18 @@ def _render_image_grid(rows: list[dict[str, Any]], limit: int = 12) -> None:
             st.image(img_path, caption=caption, use_container_width=True)
 
 
+def _find_latest_index_db(base_dir: Path) -> Path | None:
+    root = base_dir.expanduser().resolve()
+    if not root.exists():
+        return None
+    candidates = list(root.glob("*/moment_index.sqlite"))
+    candidates = [path for path in candidates if path.exists()]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
 def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
     st.markdown("### Semantic Query (Top 3)")
 
@@ -215,6 +227,8 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
         if caption_rows:
             st.write("Caption rows:")
             st.dataframe(caption_rows, use_container_width=True)
+            st.write("VLM sampled frame previews:")
+            _render_image_grid(caption_rows, limit=9)
         llm_post = p2.get("llm_postprocess", {})
         if isinstance(llm_post, dict) and llm_post:
             st.write("LLM postprocess:")
@@ -476,6 +490,10 @@ def _render_pipeline_runner() -> None:
         db_text = summary_for_db.get("moment_index_db")
         if isinstance(db_text, str) and db_text.strip():
             default_db_path = str(_expand_path(db_text))
+    if not _expand_path(default_db_path).exists():
+        latest = _find_latest_index_db(_expand_path("data/video_runs"))
+        if latest is not None:
+            default_db_path = str(latest)
     semantic_db_path_text = st.text_input(
         "Semantic index DB path",
         value=default_db_path,
