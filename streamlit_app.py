@@ -554,24 +554,16 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
             path = Path(clip_path)
             if not path.exists():
                 continue
-            try:
-                start_t = float(row.get("start_time", 0.0))
-                end_t = float(row.get("end_time", 0.0))
-            except Exception:
-                start_t = 0.0
-                end_t = 0.0
-            st.write(
-                f"rank={row.get('rank')} moment={row.get('moment_index')} "
-                f"time={start_t:.3f}s -> {end_t:.3f}s"
-            )
             mime = "video/mp4"
             if path.suffix.lower() == ".webm":
                 mime = "video/webm"
             elif path.suffix.lower() == ".ogg":
                 mime = "video/ogg"
-            st.video(path.read_bytes(), format=mime)
+            left, center, right = st.columns([1, 2, 1])
+            with center:
+                st.video(path.read_bytes(), format=mime)
             st.download_button(
-                f"Download clip (rank {row.get('rank')})",
+                f"Download clip (moment {row.get('moment_index')})",
                 data=path.read_bytes(),
                 file_name=path.name,
                 mime=mime,
