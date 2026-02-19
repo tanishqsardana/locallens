@@ -10,6 +10,7 @@ from videosearch.video_cycle import (
     VideoManifest,
     YOLOWorldConfig,
     attach_vlm_color_tags_to_moments,
+    build_no_people_moments,
     build_moment_label_allowlist,
     build_phase_outputs,
     build_keyframe_targets,
@@ -20,7 +21,9 @@ from videosearch.video_cycle import (
     extract_caption_color_tags,
     extract_chat_completion_text,
     extract_object_nouns,
+    infer_scene_profile,
     normalize_detection_rows,
+    normalize_scene_profile,
     normalize_tracking_rows,
     parse_vocab_postprocess_output,
     process_tracking_rows,
@@ -67,6 +70,20 @@ class VideoCycleHelpersTest(unittest.TestCase):
         self.assertIn("Seed labels", prompt)
         self.assertIn("Current prompt terms", prompt)
         self.assertIn("12", prompt)
+        self.assertIn("open-vocabulary visual detection", prompt)
+
+    def test_scene_profile_inference(self) -> None:
+        profile = infer_scene_profile(
+            captions=[
+                "person enters the lobby",
+                "people walking near door",
+            ],
+            discovered_labels=["person", "door", "lobby"],
+            seed_labels=None,
+            moment_label_allowlist=None,
+        )
+        self.assertEqual(profile, "pedestrian")
+        self.assertEqual(normalize_scene_profile("AUTO"), "auto")
 
     def test_build_groundingdino_caption(self) -> None:
         caption = build_groundingdino_caption(["car", " truck ", "person"])
@@ -254,6 +271,7 @@ class VideoCycleHelpersTest(unittest.TestCase):
             discovered_labels=["car"],
             prompt_terms=["car"],
             moment_label_allowlist=["car", "truck"],
+            scene_profile="traffic",
             phase2_status="provided_captions",
             include_full=False,
             preview_limit=1,
@@ -278,6 +296,7 @@ class VideoCycleHelpersTest(unittest.TestCase):
             discovered_labels=["car"],
             prompt_terms=["car"],
             moment_label_allowlist=["car", "truck"],
+            scene_profile="traffic",
             phase2_status="provided_captions",
             include_full=True,
             preview_limit=1,
@@ -317,6 +336,23 @@ class VideoCycleHelpersTest(unittest.TestCase):
         }
         text = extract_chat_completion_text(response)
         self.assertEqual(text, "The frame shows a red car and a white SUV.")
+
+    def test_build_no_people_moments(self) -> None:
+        sampled = [
+            {"frame_idx": 0, "time_sec": 0.0},
+            {"frame_idx": 1, "time_sec": 0.1},
+            {"frame_idx": 2, "time_sec": 0.2},
+            {"frame_idx": 3, "time_sec": 0.3},
+            {"frame_idx": 4, "time_sec": 0.4},
+            {"frame_idx": 5, "time_sec": 0.5},
+        ]
+        tracks = [
+            {"track_id": 1, "class": "person", "frame_idx": 2, "time_sec": 0.2},
+            {"track_id": 1, "class": "person", "frame_idx": 3, "time_sec": 0.3},
+        ]
+        out = build_no_people_moments(sampled, tracks, min_absent_frames=2)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["type"], "NO_PEOPLE")
 
     def test_parse_vocab_postprocess_output(self) -> None:
         raw = """

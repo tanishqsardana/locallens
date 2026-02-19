@@ -10,8 +10,10 @@ from .moment_query import (
     appearance_episodes,
     frames_with_label,
     load_rows,
+    no_people_intervals,
     pass_through_tracks,
     when_object_appears,
+    when_object_disappears,
 )
 
 
@@ -41,6 +43,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Merge all tracks of the label into shared presence windows (legacy behavior)",
     )
+
+    disappear = sub.add_parser("disappear", help="When does a label leave/disappear?")
+    disappear.add_argument("--label", required=True)
+    disappear.add_argument("--color", default=None, help="Optional color tag filter (e.g., white, red)")
+    disappear.add_argument("--moments", default=None)
+
+    no_people = sub.add_parser("no-people", help="Intervals where no people are in frame")
+    no_people.add_argument("--moments", default=None)
 
     frames = sub.add_parser("frames-with", help="Which frames contain a label?")
     frames.add_argument("--label", required=True)
@@ -127,6 +137,27 @@ def main() -> int:
             label=args.label,
             max_gap_frames=int(args.max_gap_frames),
         )
+        print(json.dumps(payload, indent=2, ensure_ascii=True))
+        return 0
+
+    if args.command == "disappear":
+        moments = load_rows(_resolve(run_dir, args.moments, "moments.json"))
+        color = args.color.strip().lower() if isinstance(args.color, str) and args.color.strip() else None
+        payload = {
+            "label": args.label.strip().lower(),
+            "color": color,
+            "disappear_events": when_object_disappears(
+                moments,
+                label=args.label,
+                color=color,
+            ),
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=True))
+        return 0
+
+    if args.command == "no-people":
+        moments = load_rows(_resolve(run_dir, args.moments, "moments.json"))
+        payload = {"results": no_people_intervals(moments)}
         print(json.dumps(payload, indent=2, ensure_ascii=True))
         return 0
 

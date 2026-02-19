@@ -50,6 +50,45 @@ DEFAULT_MOMENT_LABEL_ALLOWLIST = (
     "person",
     "motorcycle",
 )
+DEFAULT_PEDESTRIAN_LABEL_ALLOWLIST = (
+    "person",
+)
+DEFAULT_TRAFFIC_SEED_LABELS = (
+    "car",
+    "truck",
+    "person",
+)
+DEFAULT_PEDESTRIAN_SEED_LABELS = (
+    "person",
+)
+SCENE_PROFILE_AUTO = "auto"
+SCENE_PROFILE_TRAFFIC = "traffic"
+SCENE_PROFILE_PEDESTRIAN = "pedestrian"
+VEHICLE_SCENE_TERMS = {
+    "car",
+    "truck",
+    "bus",
+    "van",
+    "motorcycle",
+    "vehicle",
+    "traffic",
+    "highway",
+    "road",
+    "lane",
+    "suv",
+}
+PERSON_SCENE_TERMS = {
+    "person",
+    "people",
+    "pedestrian",
+    "pedestrians",
+    "walker",
+    "walkers",
+    "man",
+    "woman",
+    "child",
+    "crowd",
+}
 KNOWN_COLOR_TERMS = (
     "white",
     "black",
@@ -746,6 +785,10 @@ def attach_vlm_color_tags_to_moments(
 
     out: list[dict[str, Any]] = []
     for moment in moments:
+        moment_type = str(moment.get("type", "")).strip().upper()
+        if moment_type == "NO_PEOPLE":
+            out.append(dict(moment))
+            continue
         start_time = float(moment.get("start_time", 0.0))
         end_time = float(moment.get("end_time", start_time))
         if end_time < start_time:
@@ -823,6 +866,165 @@ def filter_labels_by_allowlist(
     return [label for label in labels if label in allowed]
 
 
+def normalize_scene_profile(scene_profile: str | None) -> str:
+    raw = str(scene_profile or SCENE_PROFILE_AUTO).strip().lower()
+    if raw in {SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN}:
+        return raw
+    raise ValueError(
+        f"scene_profile must be one of: {SCENE_PROFILE_AUTO}, {SCENE_PROFILE_TRAFFIC}, {SCENE_PROFILE_PEDESTRIAN}"
+    )
+
+
+def _scene_defaults(profile: str) -> tuple[list[str], list[str]]:
+    normalized = normalize_scene_profile(profile)
+    if normalized == SCENE_PROFILE_PEDESTRIAN:
+        return list(DEFAULT_PEDESTRIAN_SEED_LABELS), list(DEFAULT_PEDESTRIAN_LABEL_ALLOWLIST)
+    return list(DEFAULT_TRAFFIC_SEED_LABELS), list(DEFAULT_MOMENT_LABEL_ALLOWLIST)
+
+
+def _count_scene_terms(captions: Sequence[str], discovered_labels: Sequence[str], terms: set[str]) -> int:
+    score = 0
+    for caption in captions:
+        for token in TOKEN_PATTERN.findall(caption.lower()):
+            if token in terms:
+                score += 1
+    for label in discovered_labels:
+        if label.strip().lower() in terms:
+            score += 2
+    return score
+
+
+def infer_scene_profile(
+    *,
+    captions: Sequence[str],
+    discovered_labels: Sequence[str],
+    seed_labels: Sequence[str] | None,
+    moment_label_allowlist: Sequence[str] | None,
+) -> str:
+    if moment_label_allowlist is not None:
+        allow = {str(label).strip().lower() for label in moment_label_allowlist if str(label).strip()}
+        if allow and allow.issubset(PERSON_SCENE_TERMS.union({"person"})):
+            return SCENE_PROFILE_PEDESTRIAN
+    if seed_labels:
+        seed = {str(label).strip().lower() for label in seed_labels if str(label).strip()}
+        if seed and seed.issubset(PERSON_SCENE_TERMS.union({"person"})):
+            return SCENE_PROFILE_PEDESTRIAN
+
+    vehicle_score = _count_scene_terms(captions, discovered_labels, VEHICLE_SCENE_TERMS)
+    person_score = _count_scene_terms(captions, discovered_labels, PERSON_SCENE_TERMS)
+    if person_score >= 3 and vehicle_score <= 1:
+        return SCENE_PROFILE_PEDESTRIAN
+    if person_score >= max(4, (vehicle_score * 2)):
+        return SCENE_PROFILE_PEDESTRIAN
+    return SCENE_PROFILE_TRAFFIC
+
+
+def build_no_people_moments(
+    sampled_rows: Sequence[Mapping[str, Any]],
+    tracks: Sequence[Mapping[str, Any]],
+    *,
+    min_absent_frames: int = 5,
+) -> list[dict[str, Any]]:
+    if min_absent_frames <= 0:
+        min_absent_frames = 1
+    sampled = sorted(
+        [
+            {
+                "frame_idx": int(row.get("frame_idx", 0)),
+                "time_sec": float(row.get("time_sec", 0.0)),
+            }
+            for row in sampled_rows
+            if isinstance(row, Mapping)
+        ],
+        key=lambda row: row["frame_idx"],
+    )
+    if not sampled:
+        return []
+
+    person_present_frames: set[int] = set()
+    for row in tracks:
+        if str(row.get("class", "")).strip().lower() != "person":
+            continue
+        person_present_frames.add(int(row.get("frame_idx", 0)))
+
+    out: list[dict[str, Any]] = []
+    start_idx: int | None = None
+    start_time = 0.0
+    run_frames = 0
+    end_time = 0.0
+
+    def flush() -> None:
+        nonlocal start_idx, start_time, run_frames, end_time
+        if start_idx is None:
+            return
+        if run_frames >= min_absent_frames:
+            out.append(
+                {
+                    "type": "NO_PEOPLE",
+                    "start_time": float(start_time),
+                    "end_time": float(end_time),
+                    "entities": [],
+                    "metadata": {
+                        "label": "person",
+                        "label_group": "person",
+                        "absent_sampled_frames": int(run_frames),
+                    },
+                }
+            )
+        start_idx = None
+        start_time = 0.0
+        run_frames = 0
+        end_time = 0.0
+
+    for idx, row in enumerate(sampled):
+        frame_idx = int(row["frame_idx"])
+        time_sec = float(row["time_sec"])
+        absent = frame_idx not in person_present_frames
+        if absent:
+            if start_idx is None:
+                start_idx = idx
+                start_time = time_sec
+                run_frames = 1
+                end_time = time_sec
+            else:
+                run_frames += 1
+                end_time = time_sec
+        else:
+            flush()
+    flush()
+    return out
+
+
+def _sort_and_reindex_moment_rows(rows: Sequence[Mapping[str, Any]], *, video_id: str) -> list[dict[str, Any]]:
+    sorted_rows = sorted(
+        [dict(row) for row in rows],
+        key=lambda row: (
+            float(row.get("start_time", 0.0)),
+            float(row.get("end_time", row.get("start_time", 0.0))),
+            str(row.get("type", "")),
+        ),
+    )
+    out: list[dict[str, Any]] = []
+    for idx, row in enumerate(sorted_rows):
+        start_time = float(row.get("start_time", 0.0))
+        end_time = float(row.get("end_time", start_time))
+        if end_time < start_time:
+            end_time = start_time
+        out.append(
+            {
+                "moment_index": idx,
+                "video_id": str(row.get("video_id", video_id)),
+                "type": str(row.get("type", "EVENT")),
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration_sec": float(max(0.0, end_time - start_time)),
+                "entities": list(row.get("entities", [])),
+                "metadata": dict(row.get("metadata", {})) if isinstance(row.get("metadata"), Mapping) else {},
+            }
+        )
+    return out
+
+
 def _normalize_term_list(values: Any, *, max_items: int = 256) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -867,7 +1069,7 @@ def build_vocab_postprocess_prompt(
     discovered = ", ".join(discovered_labels) if discovered_labels else "(none)"
     current = ", ".join(prompt_terms) if prompt_terms else "(none)"
     return (
-        "Clean this vocabulary for open-vocab traffic detection.\n"
+        "Clean this vocabulary for open-vocabulary visual detection.\n"
         f"Seed labels: {seed}\n"
         f"Discovered labels: {discovered}\n"
         f"Current prompt terms: {current}\n"
@@ -1765,11 +1967,12 @@ def _format_semantic_moment_text(moment: Mapping[str, Any]) -> str:
     subject = label or (" and ".join(pair_terms) if pair_terms else "object")
     phrase_map = {
         "APPEAR": f"{subject} appears",
-        "DISAPPEAR": f"{subject} disappears",
+        "DISAPPEAR": f"{subject} leaves frame",
         "STOP": f"{subject} stops",
         "NEAR": f"{subject} near interaction",
         "APPROACH": f"{subject} approach interaction",
         "TRAFFIC_CHANGE": "traffic density changes",
+        "NO_PEOPLE": "no people in frame",
     }
     phrase = phrase_map.get(moment_type, f"{subject} {moment_type.lower()}")
     color_tags = metadata.get("color_tags")
@@ -2012,6 +2215,7 @@ def build_phase_outputs(
     discovered_labels: Sequence[str],
     prompt_terms: Sequence[str],
     moment_label_allowlist: Sequence[str] | None,
+    scene_profile: str,
     phase2_status: str,
     track_source: str = "tracks_json",
     detection_generation_report: Mapping[str, Any] | None = None,
@@ -2050,6 +2254,7 @@ def build_phase_outputs(
         },
         "phase_2_vocabulary": {
             "status": phase2_status,
+            "scene_profile": str(scene_profile),
             "captions_count": len(captions),
             "captions": list(captions if include_full else captions[:preview_limit]),
             "caption_rows": _slice_for_report(
@@ -2137,6 +2342,7 @@ def run_video_cycle(
     synonyms_path: str | Path | None = None,
     seed_labels: Sequence[str] | None = None,
     moment_label_allowlist: Sequence[str] | None = None,
+    scene_profile: str = SCENE_PROFILE_AUTO,
     target_fps: float = 10.0,
     moment_overrides: Mapping[str, Any] | None = None,
     track_processing_config: TrackProcessingConfig | None = None,
@@ -2166,7 +2372,25 @@ def run_video_cycle(
     manifest = ingest_video(video_path=video_path, output_dir=out_dir / "ingest", target_fps=target_fps)
     sampled_rows = json.loads(Path(manifest.sampled_frames_path).read_text(encoding="utf-8"))
     synonym_map = load_synonym_map(synonyms_path)
-    allowed_moment_labels = build_moment_label_allowlist(moment_label_allowlist, synonym_map)
+    requested_scene_profile = normalize_scene_profile(scene_profile)
+    effective_scene_profile = requested_scene_profile
+
+    provided_seed_labels = [str(item).strip() for item in (seed_labels or []) if str(item).strip()]
+    provided_allowlist = (
+        [str(item).strip() for item in moment_label_allowlist if str(item).strip()]
+        if moment_label_allowlist is not None
+        else None
+    )
+
+    bootstrap_profile = requested_scene_profile
+    if bootstrap_profile == SCENE_PROFILE_AUTO:
+        bootstrap_profile = SCENE_PROFILE_TRAFFIC
+    default_seed_labels, default_allowlist = _scene_defaults(bootstrap_profile)
+    effective_seed_labels = list(provided_seed_labels or default_seed_labels)
+    allowed_moment_labels = build_moment_label_allowlist(
+        provided_allowlist if provided_allowlist is not None else default_allowlist,
+        synonym_map,
+    )
     _log_progress(
         log_progress,
         f"Phase 1 ingest done: sampled_frames={len(sampled_rows)}, fps={manifest.fps:.2f}, duration={manifest.duration_sec:.2f}s",
@@ -2222,12 +2446,26 @@ def run_video_cycle(
     if captions:
         _log_progress(log_progress, f"Phase 2 vocabulary start: captions={len(captions)}")
         discovered = extract_object_nouns(captions, min_count=1, top_k=128)
-        prompts = build_prompt_terms(seed_labels or [], discovered, synonym_map)
+
+        if requested_scene_profile == SCENE_PROFILE_AUTO:
+            effective_scene_profile = infer_scene_profile(
+                captions=captions,
+                discovered_labels=discovered,
+                seed_labels=provided_seed_labels if provided_seed_labels else None,
+                moment_label_allowlist=provided_allowlist,
+            )
+            scene_seed_labels, scene_allowlist = _scene_defaults(effective_scene_profile)
+            if not provided_seed_labels:
+                effective_seed_labels = scene_seed_labels
+            if provided_allowlist is None:
+                allowed_moment_labels = build_moment_label_allowlist(scene_allowlist, synonym_map)
+
+        prompts = build_prompt_terms(effective_seed_labels, discovered, synonym_map)
 
         if llm_vocab_postprocess_config:
             try:
                 llm_vocab_postprocess = postprocess_vocabulary_with_llm(
-                    seed_labels=seed_labels or [],
+                    seed_labels=effective_seed_labels,
                     discovered_labels=discovered,
                     prompt_terms=prompts,
                     config=llm_vocab_postprocess_config,
@@ -2263,7 +2501,8 @@ def run_video_cycle(
         (out_dir / "vocabulary.json").write_text(
             json.dumps(
                 {
-                    "seed_labels": list(seed_labels or []),
+                    "scene_profile": effective_scene_profile,
+                    "seed_labels": list(effective_seed_labels),
                     "discovered_labels": discovered,
                     "prompt_terms": prompts,
                     "moment_label_allowlist": allowed_moment_labels,
@@ -2282,6 +2521,9 @@ def run_video_cycle(
             log_progress,
             f"Phase 2 vocabulary skipped; using moment label allowlist as prompt_terms ({len(prompts)} labels)",
         )
+
+    if effective_scene_profile == SCENE_PROFILE_AUTO:
+        effective_scene_profile = bootstrap_profile
 
     input_count = (
         int(bool(tracks_path))
@@ -2303,7 +2545,7 @@ def run_video_cycle(
     allowed_labels = set(prompts) if prompts else None
     if groundingdino_config:
         track_source = "groundingdino_iou_tracker"
-        generation_terms = prompts or list(seed_labels or [])
+        generation_terms = prompts or list(effective_seed_labels)
         if not generation_terms:
             generation_terms = ["car", "truck", "person"]
         generated_detections, detection_generation_report = generate_groundingdino_detections(
@@ -2344,7 +2586,7 @@ def run_video_cycle(
         rows = tracked_rows
     elif yoloworld_config:
         track_source = "yoloworld_iou_tracker"
-        generation_terms = prompts or list(seed_labels or [])
+        generation_terms = prompts or list(effective_seed_labels)
         if not generation_terms:
             generation_terms = ["car", "truck", "person"]
         generated_detections, detection_generation_report = generate_yoloworld_detections(
@@ -2440,6 +2682,11 @@ def run_video_cycle(
     )
 
     moment_config = _coerce_moment_config(moment_overrides)
+    if (
+        effective_scene_profile == SCENE_PROFILE_PEDESTRIAN
+        and (not moment_overrides or "emit_traffic_change" not in moment_overrides)
+    ):
+        moment_config.emit_traffic_change = False
     moments = generate_moments(
         observations=normalized,
         frame_width=manifest.width,
@@ -2448,6 +2695,17 @@ def run_video_cycle(
     )
     _log_progress(log_progress, f"Phase 4 moments done: count={len(moments)}")
     moment_rows = moments_to_dicts(moments, video_id=manifest.video_id)
+    if effective_scene_profile == SCENE_PROFILE_PEDESTRIAN:
+        no_people_rows = build_no_people_moments(
+            sampled_rows=sampled_rows,
+            tracks=normalized,
+            min_absent_frames=max(3, int(moment_config.appear_persist_frames)),
+        )
+        if no_people_rows:
+            moment_rows = _sort_and_reindex_moment_rows(
+                [*moment_rows, *no_people_rows],
+                video_id=manifest.video_id,
+            )
     if caption_rows:
         moment_rows = attach_vlm_color_tags_to_moments(
             moment_rows,
@@ -2530,6 +2788,7 @@ def run_video_cycle(
         discovered_labels=discovered,
         prompt_terms=prompts,
         moment_label_allowlist=allowed_moment_labels,
+        scene_profile=effective_scene_profile,
         phase2_status=phase2_status,
         llm_vocab_postprocess=llm_vocab_postprocess,
         include_full=include_full_phase_outputs,
@@ -2542,6 +2801,7 @@ def run_video_cycle(
     )
 
     summary = {
+        "scene_profile": effective_scene_profile,
         "video_manifest": str(out_dir / "ingest" / "video_manifest.json"),
         "detections": (
             str(detections_output_path or (out_dir / "groundingdino_detections_generated.json"))

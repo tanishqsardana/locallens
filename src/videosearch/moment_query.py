@@ -86,6 +86,58 @@ def when_object_appears(
     return out
 
 
+def when_object_disappears(
+    moments: Sequence[Mapping[str, Any]],
+    *,
+    label: str,
+    color: str | None = None,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in moments:
+        if str(row.get("type", "")).upper() != "DISAPPEAR":
+            continue
+        if not _label_match(row, label):
+            continue
+        if not _color_match(row, color):
+            continue
+        out.append(
+            {
+                "moment_index": int(row.get("moment_index", -1)),
+                "time_sec": float(row.get("start_time", 0.0)),
+                "entities": list(row.get("entities", [])),
+                "metadata": dict(row.get("metadata", {})),
+            }
+        )
+    out.sort(key=lambda item: (item["time_sec"], item["moment_index"]))
+    return out
+
+
+def no_people_intervals(
+    moments: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for row in moments:
+        if str(row.get("type", "")).strip().upper() != "NO_PEOPLE":
+            continue
+        metadata = row.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            metadata = {}
+        out.append(
+            {
+                "moment_index": int(row.get("moment_index", -1)),
+                "start_time": float(row.get("start_time", 0.0)),
+                "end_time": float(row.get("end_time", row.get("start_time", 0.0))),
+                "duration_sec": max(
+                    0.0,
+                    float(row.get("end_time", 0.0)) - float(row.get("start_time", 0.0)),
+                ),
+                "metadata": dict(metadata),
+            }
+        )
+    out.sort(key=lambda item: (item["start_time"], item["moment_index"]))
+    return out
+
+
 def frames_with_label(
     tracks: Sequence[Mapping[str, Any]],
     *,
@@ -361,14 +413,20 @@ def pass_through_tracks(
     return out
 
 
-_KNOWN_LABELS = ("car", "truck", "bus", "van", "person", "motorcycle")
+_KNOWN_LABELS = ("car", "truck", "bus", "van", "person", "pedestrian", "motorcycle")
 _KNOWN_COLORS = ("white", "black", "red", "blue", "green", "yellow", "orange", "brown", "gray", "grey", "silver", "gold")
 
 
 def _infer_label(query: str) -> str | None:
     q = query.lower()
+    if re.search(r"\bpeople\b", q):
+        return "person"
+    if re.search(r"\bpedestrians?\b", q):
+        return "person"
     for label in _KNOWN_LABELS:
         if re.search(rf"\b{re.escape(label)}s?\b", q):
+            if label == "pedestrian":
+                return "person"
             return label
     return None
 
@@ -393,6 +451,11 @@ def answer_nlq(
     q = query.strip().lower()
     label = _infer_label(q)
     color = _infer_color(q)
+    if re.search(r"\b(no|without)\s+people\b", q) or re.search(r"\bempty\s+frame", q):
+        return {
+            "intent": "no_people",
+            "results": no_people_intervals(moments),
+        }
     if label is None:
         return {"intent": "unknown", "error": "Could not infer label from query"}
 
@@ -423,6 +486,13 @@ def answer_nlq(
             "color": color,
             "results": appear_rows,
             "episodes": episodes,
+        }
+    if "leave" in q or "leaving" in q or "left" in q or "disappear" in q or "exit" in q:
+        return {
+            "intent": "disappear",
+            "label": label,
+            "color": color,
+            "results": when_object_disappears(moments, label=label, color=color),
         }
     if "pass" in q or "through" in q:
         return {

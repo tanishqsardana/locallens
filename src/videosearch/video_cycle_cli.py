@@ -9,6 +9,9 @@ from .video_cycle import (
     GroundingDINOConfig,
     YOLOWorldConfig,
     LLMVocabPostprocessConfig,
+    SCENE_PROFILE_AUTO,
+    SCENE_PROFILE_PEDESTRIAN,
+    SCENE_PROFILE_TRAFFIC,
     TrackProcessingConfig,
     VLMCaptionConfig,
     convert_bytetrack_mot_file,
@@ -17,15 +20,17 @@ from .video_cycle import (
 )
 
 
-def _parse_seed_labels(value: str | None) -> list[str]:
-    if not value:
+def _parse_seed_labels(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    if not value.strip():
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _parse_label_list(value: str | None) -> list[str]:
+def _parse_label_list(value: str | None) -> list[str] | None:
     if value is None:
-        return []
+        return None
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
@@ -102,7 +107,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--vlm-prompt",
-        default="List all visible traffic objects in this traffic frame in one short sentence.",
+        default=(
+            "List visible objects and scene elements as a comma-separated list of singular nouns, "
+            "lowercase, no adjectives/colors/verbs/locations, no duplicates, max 20 terms."
+        ),
         help="Prompt sent with each frame",
     )
     parser.add_argument("--vlm-max-tokens", type=int, default=120, help="Max caption tokens")
@@ -133,13 +141,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--synonyms", default=None, help="Optional synonym map JSON path")
     parser.add_argument(
         "--seed-labels",
-        default="car,truck,person",
-        help="Comma-separated seed labels for prompt terms",
+        default=None,
+        help="Optional comma-separated seed labels for prompt terms (defaults by scene profile)",
     )
     parser.add_argument(
         "--moment-labels",
-        default="car,truck,bus,van,person,motorcycle",
-        help="Comma-separated labels allowed into detection/tracking/moment phases",
+        default=None,
+        help="Optional comma-separated labels allowed into detection/tracking/moment phases (defaults by scene profile)",
+    )
+    parser.add_argument(
+        "--scene-profile",
+        default=SCENE_PROFILE_AUTO,
+        choices=[SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN],
+        help="Scene profile for defaults/moment behavior",
     )
     parser.add_argument("--target-fps", type=float, default=10.0, help="Video ingest sample FPS")
     parser.add_argument("--detect-track-iou-threshold", type=float, default=0.3)
@@ -339,6 +353,7 @@ def main() -> int:
         synonyms_path=args.synonyms,
         seed_labels=_parse_seed_labels(args.seed_labels),
         moment_label_allowlist=_parse_label_list(args.moment_labels),
+        scene_profile=str(args.scene_profile),
         target_fps=args.target_fps,
         moment_overrides=_load_moment_overrides(args.moment_config),
         track_processing_config=track_config,

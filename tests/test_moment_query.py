@@ -7,8 +7,10 @@ from videosearch.moment_query import (
     answer_nlq,
     appearance_episodes,
     frames_with_label,
+    no_people_intervals,
     pass_through_tracks,
     when_object_appears,
+    when_object_disappears,
 )
 
 
@@ -40,6 +42,42 @@ class MomentQueryTest(unittest.TestCase):
         self.assertEqual(len(out_white), 1)
         out_red = when_object_appears(moments, label="truck", color="red")
         self.assertEqual(len(out_red), 0)
+
+    def test_when_object_disappears(self) -> None:
+        moments = [
+            {
+                "moment_index": 2,
+                "type": "DISAPPEAR",
+                "start_time": 5.5,
+                "end_time": 5.5,
+                "entities": [9],
+                "metadata": {"label": "person", "label_group": "person"},
+            }
+        ]
+        out = when_object_disappears(moments, label="person")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["time_sec"], 5.5)
+
+    def test_no_people_intervals(self) -> None:
+        moments = [
+            {
+                "moment_index": 0,
+                "type": "NO_PEOPLE",
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "metadata": {"label_group": "person"},
+            },
+            {
+                "moment_index": 1,
+                "type": "APPEAR",
+                "start_time": 2.5,
+                "end_time": 2.5,
+                "metadata": {"label_group": "person"},
+            },
+        ]
+        out = no_people_intervals(moments)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["moment_index"], 0)
 
     def test_frames_with_label(self) -> None:
         tracks = [
@@ -149,6 +187,48 @@ class MomentQueryTest(unittest.TestCase):
         )
         self.assertEqual(out["intent"], "appear")
         self.assertEqual(out.get("color"), "white")
+        self.assertEqual(len(out["results"]), 1)
+
+    def test_answer_nlq_disappear(self) -> None:
+        moments = [
+            {
+                "moment_index": 0,
+                "type": "DISAPPEAR",
+                "start_time": 6.0,
+                "end_time": 6.0,
+                "entities": [2],
+                "metadata": {"label": "person", "label_group": "person"},
+            }
+        ]
+        out = answer_nlq(
+            "when are people leaving frame?",
+            moments=moments,
+            tracks=[],
+            frame_width=100,
+            frame_height=100,
+        )
+        self.assertEqual(out["intent"], "disappear")
+        self.assertEqual(len(out["results"]), 1)
+
+    def test_answer_nlq_no_people(self) -> None:
+        moments = [
+            {
+                "moment_index": 10,
+                "type": "NO_PEOPLE",
+                "start_time": 0.0,
+                "end_time": 3.0,
+                "entities": [],
+                "metadata": {"label_group": "person"},
+            }
+        ]
+        out = answer_nlq(
+            "when are there no people in frame?",
+            moments=moments,
+            tracks=[],
+            frame_width=100,
+            frame_height=100,
+        )
+        self.assertEqual(out["intent"], "no_people")
         self.assertEqual(len(out["results"]), 1)
 
 

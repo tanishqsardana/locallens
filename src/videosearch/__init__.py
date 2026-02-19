@@ -8,8 +8,10 @@ from .moment_query import (
     answer_nlq,
     appearance_episodes,
     frames_with_label,
+    no_people_intervals,
     pass_through_tracks,
     when_object_appears,
+    when_object_disappears,
 )
 from .moment_overlay import OverlayConfig, active_moments_at_time, render_moment_overlay_video
 from .moment_clip import ClipExportConfig, build_label_episode_ranges, export_label_episode_clips
@@ -77,6 +79,7 @@ __all__ = [
     "active_moments_at_time",
     "build_label_episode_ranges",
     "frames_with_label",
+    "no_people_intervals",
     "extract_chat_completion_text",
     "extract_object_nouns",
     "generate_groundingdino_detections",
@@ -97,6 +100,7 @@ __all__ = [
     "answer_nlq",
     "appearance_episodes",
     "when_object_appears",
+    "when_object_disappears",
     "track_detections",
     "video_fps",
     "TranscriptSegment",

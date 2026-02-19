@@ -11,6 +11,9 @@ from videosearch.moments import Moment, MomentConfig, TrackObservation, generate
 from videosearch.video_cycle import (
     DetectionTrackingConfig,
     LLMVocabPostprocessConfig,
+    SCENE_PROFILE_AUTO,
+    SCENE_PROFILE_PEDESTRIAN,
+    SCENE_PROFILE_TRAFFIC,
     TrackProcessingConfig,
     VLMCaptionConfig,
     YOLOWorldConfig,
@@ -22,17 +25,6 @@ from videosearch.video_cycle import (
 SAMPLE_FILE = Path("examples/tracks/sample_static_scene.json")
 DEFAULT_PHASE_OUTPUTS = Path("data/video_cycle_run/phase_outputs.json")
 DEFAULT_RUN_DIR = Path("data/video_cycle_run")
-DEFAULT_AUTO_LABELS = [
-    "person",
-    "car",
-    "truck",
-    "bus",
-    "van",
-    "motorcycle",
-    "bicycle",
-    "backpack",
-    "suitcase",
-]
 DEFAULT_VLM_PROMPT = (
     "List visible objects and scene elements as a comma-separated list of singular nouns, "
     "lowercase, no adjectives/colors/verbs/locations, no duplicates, max 20 terms."
@@ -443,6 +435,7 @@ def _render_phase_payload(payload: Mapping[str, Any]) -> None:
     with tabs[1]:
         st.subheader("Vocabulary")
         st.write(f"Status: `{p2.get('status', 'unknown')}`")
+        st.write(f"Scene profile: `{p2.get('scene_profile', 'unknown')}`")
         st.write(f"Captions count: `{p2.get('captions_count', 0)}`")
         caption_rows = _as_rows(p2.get("caption_rows"))
         if caption_rows:
@@ -586,6 +579,11 @@ def _render_pipeline_runner() -> None:
             yolo_frame_stride = st.number_input("YOLO frame stride", min_value=1, max_value=200, value=1, step=1)
         with a2:
             vlm_prompt = st.text_area("VLM prompt", value=DEFAULT_VLM_PROMPT, height=96)
+            scene_profile = st.selectbox(
+                "Scene profile",
+                options=[SCENE_PROFILE_AUTO, SCENE_PROFILE_TRAFFIC, SCENE_PROFILE_PEDESTRIAN],
+                index=0,
+            )
             semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
             semantic_model = st.text_input("Semantic model (optional)", value="")
             show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
@@ -603,6 +601,8 @@ def _render_pipeline_runner() -> None:
         phase_preview_limit = 25
     if "log_progress" not in locals():
         log_progress = True
+    if "scene_profile" not in locals():
+        scene_profile = SCENE_PROFILE_AUTO
     if "vlm_prompt" not in locals():
         vlm_prompt = DEFAULT_VLM_PROMPT
     if "yolo_model" not in locals():
@@ -696,8 +696,9 @@ def _render_pipeline_runner() -> None:
                     detection_tracking_config=detection_tracking_cfg,
                     captions_path=None,
                     synonyms_path=None,
-                    seed_labels=list(DEFAULT_AUTO_LABELS),
-                    moment_label_allowlist=list(DEFAULT_AUTO_LABELS),
+                    seed_labels=None,
+                    moment_label_allowlist=None,
+                    scene_profile=str(scene_profile),
                     target_fps=float(target_fps),
                     moment_overrides=None,
                     track_processing_config=track_processing_cfg,
