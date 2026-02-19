@@ -101,9 +101,6 @@ def _render_image_grid(rows: list[dict[str, Any]], limit: int = 12) -> None:
 
 def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
     st.markdown("### Semantic Query (Top 3)")
-    if not db_path.exists():
-        st.info(f"Index DB not found: `{db_path}`")
-        return
 
     query = st.text_input(
         "Ask a retrieval query",
@@ -112,12 +109,19 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
     )
     search_clicked = st.button("Run Semantic Search", key=f"{key_prefix}_query_run")
     if search_clicked:
+        if not db_path.exists():
+            st.error(f"Index DB not found: `{db_path}`")
+            return
         try:
             results = semantic_search_moments(db_path=str(db_path), query=query, top_k=3)
             st.session_state[f"{key_prefix}_query_results"] = results[:3]
             st.session_state[f"{key_prefix}_query_last"] = query
         except Exception as exc:
             st.error(f"Semantic search failed: {exc}")
+
+    if not db_path.exists():
+        st.caption(f"Set a valid index DB path or run pipeline first. Current path: `{db_path}`")
+        return
 
     results = st.session_state.get(f"{key_prefix}_query_results", [])
     if not isinstance(results, list):
