@@ -2,138 +2,35 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import streamlit as st
 
 from videosearch.moments import Moment, MomentConfig, TrackObservation, generate_moments
+from videosearch.video_cycle import (
+    DetectionTrackingConfig,
+    GroundingDINOConfig,
+    LLMVocabPostprocessConfig,
+    TrackProcessingConfig,
+    VLMCaptionConfig,
+    YOLOWorldConfig,
+    convert_bytetrack_mot_file,
+    run_video_cycle,
+    video_fps,
+)
 
 
 SAMPLE_FILE = Path("examples/tracks/sample_static_scene.json")
 DEFAULT_PHASE_OUTPUTS = Path("data/video_cycle_run/phase_outputs.json")
+DEFAULT_RUN_DIR = Path("data/video_cycle_run")
 
 
-def _load_sample() -> dict[str, Any]:
-    if not SAMPLE_FILE.exists():
-        return {"frame_width": 1280, "frame_height": 720, "observations": []}
-    payload = json.loads(SAMPLE_FILE.read_text(encoding="utf-8"))
-    if isinstance(payload, list):
-        return {"frame_width": 1280, "frame_height": 720, "observations": payload}
-    if isinstance(payload, dict):
-        return {
-            "frame_width": int(payload.get("frame_width", 1280)),
-            "frame_height": int(payload.get("frame_height", 720)),
-            "observations": payload.get("observations", []),
-        }
-    return {"frame_width": 1280, "frame_height": 720, "observations": []}
+def _expand_path(value: str) -> Path:
+    return Path(value).expanduser().resolve()
 
 
-def _parse_uploaded(raw_text: str) -> dict[str, Any]:
-    data = json.loads(raw_text)
-    if isinstance(data, list):
-        return {"frame_width": 1280, "frame_height": 720, "observations": data}
-    if isinstance(data, dict):
-        observations = data.get("observations")
-        if observations is None:
-            raise ValueError("JSON object must contain an `observations` field")
-        return {
-            "frame_width": int(data.get("frame_width", 1280)),
-            "frame_height": int(data.get("frame_height", 720)),
-            "observations": observations,
-        }
-    raise ValueError("Uploaded JSON must be either a list or an object")
-
-
-def _to_observations(rows: list[dict[str, Any]]) -> list[TrackObservation]:
-    parsed: list[TrackObservation] = []
-    for row in rows:
-        parsed.append(TrackObservation.from_mapping(row))
-    return parsed
-
-
-def _build_config() -> MomentConfig:
-    st.sidebar.header("Moment Config")
-    appear = st.sidebar.number_input("APPEAR persist frames", min_value=1, max_value=30, value=5, step=1)
-    disappear = st.sidebar.number_input(
-        "DISAPPEAR missing frames",
-        min_value=1,
-        max_value=60,
-        value=10,
-        step=1,
-    )
-    stop_enter = st.sidebar.number_input("STOP enter frames", min_value=1, max_value=30, value=8, step=1)
-    stop_exit = st.sidebar.number_input("STOP exit frames", min_value=1, max_value=30, value=8, step=1)
-    near_enter = st.sidebar.number_input("NEAR enter frames", min_value=1, max_value=30, value=8, step=1)
-    near_exit = st.sidebar.number_input("NEAR exit frames", min_value=1, max_value=30, value=8, step=1)
-    approach_window = st.sidebar.number_input("APPROACH window", min_value=2, max_value=30, value=8, step=1)
-    approach_reverse = st.sidebar.number_input(
-        "APPROACH reverse frames",
-        min_value=1,
-        max_value=30,
-        value=8,
-        step=1,
-    )
-    stop_speed = st.sidebar.slider("STOP speed threshold", min_value=0.001, max_value=0.200, value=0.012, step=0.001)
-    movement_speed = st.sidebar.slider(
-        "Movement speed threshold",
-        min_value=0.001,
-        max_value=0.300,
-        value=0.022,
-        step=0.001,
-    )
-    near_threshold = st.sidebar.slider("NEAR threshold", min_value=0.010, max_value=0.500, value=0.090, step=0.001)
-    near_exit_threshold = st.sidebar.slider(
-        "NEAR exit threshold",
-        min_value=0.010,
-        max_value=0.600,
-        value=0.110,
-        step=0.001,
-    )
-    approach_drop = st.sidebar.slider(
-        "APPROACH drop threshold",
-        min_value=0.005,
-        max_value=0.500,
-        value=0.040,
-        step=0.001,
-    )
-    ema_alpha = st.sidebar.slider("Speed EMA alpha", min_value=0.05, max_value=1.00, value=0.40, step=0.05)
-    merge_gap = st.sidebar.slider("Merge gap (sec)", min_value=0.0, max_value=3.0, value=1.0, step=0.1)
-
-    config = MomentConfig(
-        appear_persist_frames=int(appear),
-        disappear_missing_frames=int(disappear),
-        stop_enter_frames=int(stop_enter),
-        stop_exit_frames=int(stop_exit),
-        near_enter_frames=int(near_enter),
-        near_exit_frames=int(near_exit),
-        approach_window=int(approach_window),
-        approach_reverse_frames=int(approach_reverse),
-        stop_speed_threshold=float(stop_speed),
-        movement_speed_threshold=float(movement_speed),
-        near_threshold=float(near_threshold),
-        near_threshold_exit=float(near_exit_threshold),
-        approach_drop_threshold=float(approach_drop),
-        speed_ema_alpha=float(ema_alpha),
-        merge_gap_sec=float(merge_gap),
-    )
-    config.validate()
-    return config
-
-
-def _moment_rows(moments: list[Moment]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for moment in moments:
-        rows.append(
-            {
-                "type": moment.type,
-                "start_time": round(moment.start_time, 3),
-                "end_time": round(moment.end_time, 3),
-                "duration_sec": round(max(0.0, moment.end_time - moment.start_time), 3),
-                "entities": ",".join(str(entity) for entity in moment.entities),
-                "metadata": json.dumps(moment.metadata, ensure_ascii=True, sort_keys=True),
-            }
-        )
-    return rows
+def _parse_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def _safe_json_read(path: Path) -> dict[str, Any] | None:
@@ -150,13 +47,33 @@ def _safe_json_read(path: Path) -> dict[str, Any] | None:
     return None
 
 
+def _safe_summary_read(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _load_optional_json_object(path_text: str) -> dict[str, Any] | None:
+    if not path_text.strip():
+        return None
+    path = _expand_path(path_text)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("JSON file must contain an object")
+    return {str(k): v for k, v in raw.items()}
+
+
 def _as_rows(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
-        out: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for item in value:
-            if isinstance(item, dict):
-                out.append(item)
-        return out
+            if isinstance(item, Mapping):
+                rows.append(dict(item))
+        return rows
     return []
 
 
@@ -173,31 +90,13 @@ def _render_image_grid(rows: list[dict[str, Any]], limit: int = 12) -> None:
         st.info("No preview images found on disk for these rows.")
         return
 
-    show = images[:limit]
     cols = st.columns(3)
-    for idx, (img_path, caption) in enumerate(show):
+    for idx, (img_path, caption) in enumerate(images[:limit]):
         with cols[idx % 3]:
             st.image(img_path, caption=caption, use_container_width=True)
 
 
-def _render_cycle_inspector() -> None:
-    st.title("Video Cycle Inspector")
-    st.caption("Inspect end-to-end pipeline phases from `phase_outputs.json`.")
-
-    default_path = str(DEFAULT_PHASE_OUTPUTS)
-    phase_path_str = st.text_input("phase_outputs.json path", value=default_path)
-    phase_path = Path(phase_path_str)
-    payload = _safe_json_read(phase_path)
-
-    if payload is None:
-        st.warning("Could not load phase outputs. Run the CLI first, then point this to `phase_outputs.json`.")
-        st.code(
-            "PYTHONPATH=src python -m videosearch.video_cycle_cli --video /path/video.mp4 "
-            "--tracks /path/tracks.json --out-dir data/video_cycle_run --show-phase-outputs",
-            language="bash",
-        )
-        return
-
+def _render_phase_payload(payload: Mapping[str, Any]) -> None:
     p1 = payload.get("phase_1_ingest", {})
     p2 = payload.get("phase_2_vocabulary", {})
     p3 = payload.get("phase_3_normalized_tracks", {})
@@ -206,11 +105,12 @@ def _render_cycle_inspector() -> None:
     p6 = payload.get("phase_6_embeddings", {})
     p7 = payload.get("phase_7_index", {})
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Sampled Frames", p1.get("sampled_frame_count", 0))
-    c2.metric("Normalized Tracks", p3.get("normalized_track_row_count", 0))
-    c3.metric("Moments", p4.get("moment_count", 0))
-    c4.metric("Embeddings", p6.get("embedded_moment_count", 0))
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Sampled Frames", int(p1.get("sampled_frame_count", 0)))
+    c2.metric("Processed Tracks", int(p3.get("processed_track_row_count", p3.get("normalized_track_row_count", 0))))
+    c3.metric("Moments", int(p4.get("moment_count", 0)))
+    c4.metric("Embeddings", int(p6.get("embedded_moment_count", 0)))
+    c5.metric("Semantic Embeds", int(p6.get("semantic_embedded_moment_count", 0)))
 
     tabs = st.tabs(
         [
@@ -255,55 +155,62 @@ def _render_cycle_inspector() -> None:
         st.json(p2.get("synonym_map", {}))
 
     with tabs[2]:
-        st.subheader("Normalized Tracks")
+        st.subheader("Processed Tracks")
         st.write(f"Track source: `{p3.get('track_source', 'tracks_json')}`")
         st.write(f"Raw rows: `{p3.get('raw_track_row_count', 0)}`")
         st.write(f"Tracked rows: `{p3.get('tracked_row_count', p3.get('raw_track_row_count', 0))}`")
         st.write(f"Canonicalized rows: `{p3.get('canonicalized_track_row_count', p3.get('normalized_track_row_count', 0))}`")
         st.write(f"Processed rows: `{p3.get('processed_track_row_count', p3.get('normalized_track_row_count', 0))}`")
-        detection_tracking = p3.get("detection_tracking", {})
         detection_generation = p3.get("detection_generation", {})
+        detection_tracking = p3.get("detection_tracking", {})
+        track_processing = p3.get("track_processing", {})
         if isinstance(detection_generation, dict) and detection_generation:
             st.write("Detection generation report:")
             st.json(detection_generation)
         if isinstance(detection_tracking, dict) and detection_tracking:
             st.write("Detection tracking report:")
             st.json(detection_tracking)
-        track_processing = p3.get("track_processing", {})
         if isinstance(track_processing, dict) and track_processing:
             st.write("Track processing report:")
             st.json(track_processing)
-        track_rows = _as_rows(p3.get("rows"))
-        if track_rows:
-            st.dataframe(track_rows, use_container_width=True)
+        rows = _as_rows(p3.get("rows"))
+        if rows:
+            st.dataframe(rows, use_container_width=True)
         else:
             st.info("No track rows in report.")
 
     with tabs[3]:
         st.subheader("Moments")
-        st.json({"moment_type_counts": p4.get("moment_type_counts", {})})
-        moment_rows = _as_rows(p4.get("moments"))
-        if moment_rows:
-            st.dataframe(moment_rows, use_container_width=True)
+        st.json(
+            {
+                "moment_type_counts": p4.get("moment_type_counts", {}),
+                "color_tagged_moment_count": p4.get("color_tagged_moment_count", 0),
+            }
+        )
+        rows = _as_rows(p4.get("moments"))
+        if rows:
+            st.dataframe(rows, use_container_width=True)
         else:
             st.info("No moments in report.")
 
     with tabs[4]:
         st.subheader("Moment Keyframes")
-        keyframe_rows = _as_rows(p5.get("rows"))
-        if keyframe_rows:
-            st.dataframe(keyframe_rows, use_container_width=True)
-            _render_image_grid(keyframe_rows, limit=12)
+        rows = _as_rows(p5.get("rows"))
+        if rows:
+            st.dataframe(rows, use_container_width=True)
+            _render_image_grid(rows, limit=12)
         else:
             st.info("No keyframes in report.")
 
     with tabs[5]:
         st.subheader("Embeddings")
-        st.write(f"Model: `{p6.get('embedding_model', 'unknown')}`")
-        st.write(f"Dimension: `{p6.get('embedding_dim', 0)}`")
-        embed_rows = _as_rows(p6.get("rows"))
-        if embed_rows:
-            st.dataframe(embed_rows, use_container_width=True)
+        st.write(f"Image model: `{p6.get('embedding_model', 'unknown')}`")
+        st.write(f"Image dim: `{p6.get('embedding_dim', 0)}`")
+        st.write(f"Semantic model: `{p6.get('semantic_embedding_model', '') or '(disabled)'}`")
+        st.write(f"Semantic dim: `{p6.get('semantic_embedding_dim', 0)}`")
+        rows = _as_rows(p6.get("rows"))
+        if rows:
+            st.dataframe(rows, use_container_width=True)
         else:
             st.info("No embedding rows in report.")
 
@@ -312,12 +219,460 @@ def _render_cycle_inspector() -> None:
         st.json(p7)
 
 
+def _render_pipeline_runner() -> None:
+    st.title("Video Pipeline Runner")
+    st.caption("Run ingest -> vocab -> detection/tracking -> moments -> keyframes -> embeddings -> index directly from UI.")
+
+    if "video_a" not in st.session_state:
+        st.session_state["video_a"] = ""
+    if "video_b" not in st.session_state:
+        st.session_state["video_b"] = ""
+    if "active_video" not in st.session_state:
+        st.session_state["active_video"] = ""
+
+    with st.expander("Quick Video Presets", expanded=False):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.session_state["video_a"] = st.text_input("Video A", value=st.session_state["video_a"])
+            if st.button("Use Video A"):
+                st.session_state["active_video"] = st.session_state["video_a"]
+        with col_b:
+            st.session_state["video_b"] = st.text_input("Video B", value=st.session_state["video_b"])
+            if st.button("Use Video B"):
+                st.session_state["active_video"] = st.session_state["video_b"]
+
+    video_default = st.session_state.get("active_video", "")
+    if not video_default:
+        video_default = str(DEFAULT_RUN_DIR / "video.mp4")
+
+    video_path_text = st.text_input("Video path", value=video_default)
+    out_dir_text = st.text_input("Output directory", value=str(DEFAULT_RUN_DIR))
+
+    source_mode = st.selectbox(
+        "Track input mode",
+        options=[
+            "Tracks JSON",
+            "ByteTrack MOT TXT",
+            "Detections JSON (track in pipeline)",
+            "Auto detections: YOLO-World",
+            "Auto detections: GroundingDINO",
+        ],
+        index=0,
+    )
+
+    tracks_path_text = ""
+    bytetrack_txt_text = ""
+    detections_path_text = ""
+    groundingdino_cfg: GroundingDINOConfig | None = None
+    yoloworld_cfg: YOLOWorldConfig | None = None
+    input_tracks_path: str | None = None
+    input_detections_path: str | None = None
+
+    if source_mode == "Tracks JSON":
+        tracks_path_text = st.text_input("Tracks JSON path", value=str(DEFAULT_RUN_DIR / "normalized_tracks.json"))
+    elif source_mode == "ByteTrack MOT TXT":
+        bytetrack_txt_text = st.text_input("ByteTrack MOT TXT path", value="")
+        c1, c2 = st.columns(2)
+        with c1:
+            bytetrack_class = st.text_input("ByteTrack class label", value="car")
+        with c2:
+            bytetrack_min_score = st.number_input("ByteTrack min score", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
+    elif source_mode == "Detections JSON (track in pipeline)":
+        detections_path_text = st.text_input("Detections JSON path", value="")
+    elif source_mode == "Auto detections: YOLO-World":
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            yw_model = st.text_input("YOLO-World model", value="yolov8s-worldv2.pt")
+            yw_device = st.text_input("YOLO-World device", value="cuda")
+        with c2:
+            yw_conf = st.number_input("YOLO-World confidence", min_value=0.0, max_value=1.0, value=0.3, step=0.01)
+            yw_iou = st.number_input("YOLO-World IOU threshold", min_value=0.0, max_value=1.0, value=0.7, step=0.01)
+        with c3:
+            yw_stride = st.number_input("YOLO-World frame stride", min_value=1, max_value=100, value=1, step=1)
+            yw_max_frames = st.number_input("YOLO-World max frames (0 = all)", min_value=0, max_value=100000, value=0, step=1)
+        yoloworld_cfg = YOLOWorldConfig(
+            model=yw_model,
+            confidence=float(yw_conf),
+            iou_threshold=float(yw_iou),
+            device=yw_device,
+            frame_stride=int(yw_stride),
+            max_frames=int(yw_max_frames),
+        )
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            gdino_cfg_path = st.text_input("GroundingDINO config path", value="")
+            gdino_box = st.number_input("GroundingDINO box threshold", min_value=0.0, max_value=1.0, value=0.25, step=0.01)
+            gdino_device = st.text_input("GroundingDINO device", value="cuda")
+        with c2:
+            gdino_weights_path = st.text_input("GroundingDINO weights path", value="")
+            gdino_text = st.number_input("GroundingDINO text threshold", min_value=0.0, max_value=1.0, value=0.25, step=0.01)
+            gdino_stride = st.number_input("GroundingDINO frame stride", min_value=1, max_value=100, value=1, step=1)
+        gdino_max_frames = st.number_input("GroundingDINO max frames (0 = all)", min_value=0, max_value=100000, value=0, step=1)
+        groundingdino_cfg = GroundingDINOConfig(
+            model_config_path=gdino_cfg_path,
+            model_weights_path=gdino_weights_path,
+            box_threshold=float(gdino_box),
+            text_threshold=float(gdino_text),
+            device=gdino_device,
+            frame_stride=int(gdino_stride),
+            max_frames=int(gdino_max_frames),
+        )
+
+    st.markdown("### Phase 2 Vocabulary / Captions")
+    caption_mode = st.radio(
+        "Caption source",
+        options=["None", "Captions JSON path", "Auto captions via VLM"],
+        horizontal=True,
+        index=0,
+    )
+    captions_path_text = ""
+    vlm_cfg: VLMCaptionConfig | None = None
+    if caption_mode == "Captions JSON path":
+        captions_path_text = st.text_input("Captions JSON path", value=str(DEFAULT_RUN_DIR / "vlm_captions_generated.json"))
+    elif caption_mode == "Auto captions via VLM":
+        c1, c2 = st.columns(2)
+        with c1:
+            vlm_endpoint = st.text_input("VLM endpoint", value="http://localhost:8000/v1/chat/completions")
+            vlm_model = st.text_input("VLM model", value="nvidia/Qwen2.5-VL-7B-Instruct-NVFP4")
+            vlm_prompt = st.text_area(
+                "VLM prompt",
+                value="List only visible traffic objects and road infrastructure in this frame as a comma-separated list of singular nouns, lowercase, no adjectives/colors/verbs/locations, no duplicates, max 20 terms.",
+                height=96,
+            )
+        with c2:
+            vlm_max_tokens = st.number_input("VLM max tokens", min_value=1, max_value=4096, value=120, step=1)
+            vlm_frame_stride = st.number_input("VLM frame stride", min_value=1, max_value=500, value=25, step=1)
+            vlm_timeout_sec = st.number_input("VLM timeout sec", min_value=1.0, max_value=600.0, value=60.0, step=1.0)
+            vlm_temperature = st.number_input("VLM temperature", min_value=0.0, max_value=2.0, value=0.0, step=0.1)
+            vlm_api_key = st.text_input("VLM API key (optional)", value="", type="password")
+        vlm_cfg = VLMCaptionConfig(
+            endpoint=vlm_endpoint,
+            model=vlm_model,
+            prompt=vlm_prompt,
+            max_tokens=int(vlm_max_tokens),
+            frame_stride=int(vlm_frame_stride),
+            timeout_sec=float(vlm_timeout_sec),
+            temperature=float(vlm_temperature),
+            api_key=vlm_api_key.strip() or None,
+        )
+
+    llm_postprocess_vocab = st.checkbox("Enable LLM vocabulary postprocess", value=True)
+    llm_vocab_cfg: LLMVocabPostprocessConfig | None = None
+    if llm_postprocess_vocab:
+        c1, c2 = st.columns(2)
+        with c1:
+            default_endpoint = vlm_cfg.endpoint if vlm_cfg else "http://localhost:8000/v1/chat/completions"
+            default_model = vlm_cfg.model if vlm_cfg else "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4"
+            llm_endpoint = st.text_input("LLM postprocess endpoint", value=default_endpoint)
+            llm_model = st.text_input("LLM postprocess model", value=default_model)
+            llm_api_key = st.text_input("LLM postprocess API key (optional)", value="", type="password")
+        with c2:
+            llm_max_tokens = st.number_input("LLM postprocess max tokens", min_value=1, max_value=4096, value=500, step=1)
+            llm_timeout_sec = st.number_input("LLM postprocess timeout sec", min_value=1.0, max_value=600.0, value=60.0, step=1.0)
+            llm_temperature = st.number_input("LLM postprocess temperature", min_value=0.0, max_value=2.0, value=0.0, step=0.1)
+            llm_max_terms = st.number_input("LLM max detection terms", min_value=1, max_value=256, value=20, step=1)
+        llm_vocab_cfg = LLMVocabPostprocessConfig(
+            endpoint=llm_endpoint,
+            model=llm_model,
+            max_tokens=int(llm_max_tokens),
+            timeout_sec=float(llm_timeout_sec),
+            temperature=float(llm_temperature),
+            api_key=llm_api_key.strip() or None,
+            max_detection_terms=int(llm_max_terms),
+        )
+
+    st.markdown("### Pipeline Config")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        target_fps = st.number_input("Target ingest FPS", min_value=1.0, max_value=120.0, value=10.0, step=1.0)
+        synonyms_path_text = st.text_input("Synonyms JSON (optional)", value="")
+    with c2:
+        seed_labels_text = st.text_input("Seed labels CSV", value="car,truck,person")
+        moment_labels_text = st.text_input("Moment labels CSV", value="car,truck,bus,van,person,motorcycle")
+    with c3:
+        moment_config_path_text = st.text_input("Moment config overrides JSON (optional)", value="")
+        log_progress = st.checkbox("Log progress", value=True)
+
+    st.markdown("### Detection Tracking Config")
+    d1, d2, d3, d4 = st.columns(4)
+    with d1:
+        detect_track_iou = st.number_input("IOU threshold", min_value=0.01, max_value=1.0, value=0.3, step=0.01)
+    with d2:
+        detect_track_missed = st.number_input("Max missed frames", min_value=0, max_value=500, value=10, step=1)
+    with d3:
+        detect_track_conf = st.number_input("Min detection confidence", min_value=0.0, max_value=1.0, value=0.25, step=0.01)
+    with d4:
+        detect_track_class_agnostic = st.checkbox("Class agnostic tracking", value=False)
+
+    st.markdown("### Track Processing Config")
+    t1, t2, t3, t4 = st.columns(4)
+    with t1:
+        track_min_conf = st.number_input("Track min confidence", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
+    with t2:
+        track_min_length = st.number_input("Track min length (frames)", min_value=1, max_value=500, value=5, step=1)
+    with t3:
+        track_max_interp_gap = st.number_input("Track max interp gap", min_value=0, max_value=100, value=0, step=1)
+    with t4:
+        clip_bboxes_to_frame = st.checkbox("Clip bboxes to frame", value=True)
+
+    st.markdown("### Phase 6/7 Semantic Index Config")
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        enable_semantic_index = st.checkbox("Enable semantic index", value=True)
+    with s2:
+        semantic_embedder = st.selectbox("Semantic embedder", options=["hashing", "sentence-transformer"], index=0)
+    with s3:
+        semantic_model = st.text_input("Semantic model (optional)", value="")
+
+    st.markdown("### Phase Output Display")
+    o1, o2 = st.columns(2)
+    with o1:
+        show_full_phase_outputs = st.checkbox("Include full phase outputs", value=False)
+    with o2:
+        phase_preview_limit = st.number_input("Phase preview limit", min_value=1, max_value=2000, value=25, step=1)
+
+    run_clicked = st.button("Run Full Pipeline", type="primary")
+    if run_clicked:
+        try:
+            video_path = _expand_path(video_path_text)
+            if not video_path.exists():
+                raise FileNotFoundError(f"Video path not found: {video_path}")
+            out_dir = _expand_path(out_dir_text)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            if source_mode == "Tracks JSON":
+                tracks_path = _expand_path(tracks_path_text)
+                if not tracks_path.exists():
+                    raise FileNotFoundError(f"Tracks JSON not found: {tracks_path}")
+                input_tracks_path = str(tracks_path)
+            elif source_mode == "ByteTrack MOT TXT":
+                bt_path = _expand_path(bytetrack_txt_text)
+                if not bt_path.exists():
+                    raise FileNotFoundError(f"ByteTrack txt not found: {bt_path}")
+                fps = video_fps(video_path)
+                converted = convert_bytetrack_mot_file(
+                    mot_txt_path=bt_path,
+                    fps=fps,
+                    class_label=bytetrack_class.strip() or "car",
+                    min_score=float(bytetrack_min_score),
+                )
+                inputs_dir = out_dir / "inputs"
+                inputs_dir.mkdir(parents=True, exist_ok=True)
+                converted_path = inputs_dir / "converted_tracks_from_bytetrack.json"
+                converted_path.write_text(json.dumps(converted, indent=2, ensure_ascii=True), encoding="utf-8")
+                input_tracks_path = str(converted_path)
+            elif source_mode == "Detections JSON (track in pipeline)":
+                det_path = _expand_path(detections_path_text)
+                if not det_path.exists():
+                    raise FileNotFoundError(f"Detections JSON not found: {det_path}")
+                input_detections_path = str(det_path)
+            elif source_mode == "Auto detections: YOLO-World":
+                if yoloworld_cfg is None:
+                    raise ValueError("YOLO-World config missing")
+                yoloworld_cfg.validate()
+            else:
+                if groundingdino_cfg is None:
+                    raise ValueError("GroundingDINO config missing")
+                groundingdino_cfg.validate()
+
+            captions_path = None
+            if caption_mode == "Captions JSON path":
+                cp = _expand_path(captions_path_text)
+                if not cp.exists():
+                    raise FileNotFoundError(f"Captions JSON not found: {cp}")
+                captions_path = str(cp)
+            if vlm_cfg is not None:
+                vlm_cfg.validate()
+            if llm_vocab_cfg is not None:
+                llm_vocab_cfg.validate()
+
+            detection_tracking_cfg = DetectionTrackingConfig(
+                iou_threshold=float(detect_track_iou),
+                max_missed_frames=int(detect_track_missed),
+                min_detection_confidence=float(detect_track_conf),
+                class_aware=not bool(detect_track_class_agnostic),
+            )
+            detection_tracking_cfg.validate()
+
+            track_processing_cfg = TrackProcessingConfig(
+                min_confidence=float(track_min_conf),
+                min_track_length_frames=int(track_min_length),
+                max_interp_gap_frames=int(track_max_interp_gap),
+                clip_bboxes_to_frame=bool(clip_bboxes_to_frame),
+            )
+            track_processing_cfg.validate()
+
+            synonyms_path = None
+            if synonyms_path_text.strip():
+                sp = _expand_path(synonyms_path_text)
+                if not sp.exists():
+                    raise FileNotFoundError(f"Synonyms JSON not found: {sp}")
+                synonyms_path = str(sp)
+
+            moment_overrides = _load_optional_json_object(moment_config_path_text)
+
+            with st.spinner("Running full video cycle. This can take a while on long videos..."):
+                summary = run_video_cycle(
+                    video_path=str(video_path),
+                    tracks_path=input_tracks_path,
+                    detections_path=input_detections_path,
+                    groundingdino_config=groundingdino_cfg,
+                    yoloworld_config=yoloworld_cfg,
+                    output_dir=str(out_dir),
+                    detection_tracking_config=(
+                        detection_tracking_cfg
+                        if (input_detections_path or groundingdino_cfg is not None or yoloworld_cfg is not None)
+                        else None
+                    ),
+                    captions_path=captions_path,
+                    synonyms_path=synonyms_path,
+                    seed_labels=_parse_csv(seed_labels_text),
+                    moment_label_allowlist=_parse_csv(moment_labels_text),
+                    target_fps=float(target_fps),
+                    moment_overrides=moment_overrides,
+                    track_processing_config=track_processing_cfg,
+                    vlm_caption_config=vlm_cfg,
+                    llm_vocab_postprocess_config=llm_vocab_cfg,
+                    log_progress=bool(log_progress),
+                    include_full_phase_outputs=bool(show_full_phase_outputs),
+                    phase_preview_limit=int(phase_preview_limit),
+                    semantic_index_embedder=semantic_embedder,
+                    semantic_index_model=(semantic_model.strip() or None),
+                    enable_semantic_index=bool(enable_semantic_index),
+                )
+
+            st.session_state["last_summary"] = summary
+            st.session_state["last_phase_outputs_path"] = summary.get("phase_outputs")
+            st.success("Pipeline run completed.")
+        except Exception as exc:
+            st.error(f"Pipeline failed: {exc}")
+
+    summary = st.session_state.get("last_summary")
+    if isinstance(summary, Mapping):
+        st.markdown("### Run Summary")
+        st.json(dict(summary))
+        phase_path_text = summary.get("phase_outputs")
+        if isinstance(phase_path_text, str):
+            phase_path = _expand_path(phase_path_text)
+            payload = _safe_json_read(phase_path)
+            if payload is not None:
+                st.markdown("### Phase Outputs")
+                _render_phase_payload(payload)
+
+
+def _render_cycle_inspector() -> None:
+    st.title("Video Cycle Inspector")
+    st.caption("Inspect existing `phase_outputs.json` generated by CLI or Pipeline Runner.")
+    default_path = st.session_state.get("last_phase_outputs_path") or str(DEFAULT_PHASE_OUTPUTS)
+    phase_path_text = st.text_input("phase_outputs.json path", value=str(default_path))
+    payload = _safe_json_read(_expand_path(phase_path_text))
+    if payload is None:
+        st.warning("Could not load phase outputs. Run pipeline first and point to a valid `phase_outputs.json`.")
+        return
+
+    summary_path = _expand_path(phase_path_text).parent / "run_summary.json"
+    summary = _safe_summary_read(summary_path)
+    if summary is not None:
+        with st.expander("run_summary.json", expanded=False):
+            st.json(summary)
+    _render_phase_payload(payload)
+
+
+def _load_sample() -> dict[str, Any]:
+    if not SAMPLE_FILE.exists():
+        return {"frame_width": 1280, "frame_height": 720, "observations": []}
+    payload = json.loads(SAMPLE_FILE.read_text(encoding="utf-8"))
+    if isinstance(payload, list):
+        return {"frame_width": 1280, "frame_height": 720, "observations": payload}
+    if isinstance(payload, dict):
+        return {
+            "frame_width": int(payload.get("frame_width", 1280)),
+            "frame_height": int(payload.get("frame_height", 720)),
+            "observations": payload.get("observations", []),
+        }
+    return {"frame_width": 1280, "frame_height": 720, "observations": []}
+
+
+def _parse_uploaded(raw_text: str) -> dict[str, Any]:
+    data = json.loads(raw_text)
+    if isinstance(data, list):
+        return {"frame_width": 1280, "frame_height": 720, "observations": data}
+    if isinstance(data, dict):
+        observations = data.get("observations")
+        if observations is None:
+            raise ValueError("JSON object must contain an `observations` field")
+        return {
+            "frame_width": int(data.get("frame_width", 1280)),
+            "frame_height": int(data.get("frame_height", 720)),
+            "observations": observations,
+        }
+    raise ValueError("Uploaded JSON must be either a list or an object")
+
+
+def _to_observations(rows: list[dict[str, Any]]) -> list[TrackObservation]:
+    return [TrackObservation.from_mapping(row) for row in rows]
+
+
+def _build_moment_config() -> MomentConfig:
+    st.sidebar.header("Moment Config")
+    appear = st.sidebar.number_input("APPEAR persist frames", min_value=1, max_value=30, value=5, step=1)
+    disappear = st.sidebar.number_input("DISAPPEAR missing frames", min_value=1, max_value=60, value=10, step=1)
+    stop_enter = st.sidebar.number_input("STOP enter frames", min_value=1, max_value=30, value=8, step=1)
+    stop_exit = st.sidebar.number_input("STOP exit frames", min_value=1, max_value=30, value=8, step=1)
+    near_enter = st.sidebar.number_input("NEAR enter frames", min_value=1, max_value=30, value=8, step=1)
+    near_exit = st.sidebar.number_input("NEAR exit frames", min_value=1, max_value=30, value=8, step=1)
+    approach_window = st.sidebar.number_input("APPROACH window", min_value=2, max_value=30, value=8, step=1)
+    approach_reverse = st.sidebar.number_input("APPROACH reverse frames", min_value=1, max_value=30, value=8, step=1)
+    stop_speed = st.sidebar.slider("STOP speed threshold", min_value=0.001, max_value=0.200, value=0.012, step=0.001)
+    movement_speed = st.sidebar.slider("Movement speed threshold", min_value=0.001, max_value=0.300, value=0.022, step=0.001)
+    near_threshold = st.sidebar.slider("NEAR threshold", min_value=0.010, max_value=0.500, value=0.090, step=0.001)
+    near_exit_threshold = st.sidebar.slider("NEAR exit threshold", min_value=0.010, max_value=0.600, value=0.110, step=0.001)
+    approach_drop = st.sidebar.slider("APPROACH drop threshold", min_value=0.005, max_value=0.500, value=0.040, step=0.001)
+    ema_alpha = st.sidebar.slider("Speed EMA alpha", min_value=0.05, max_value=1.00, value=0.40, step=0.05)
+    merge_gap = st.sidebar.slider("Merge gap (sec)", min_value=0.0, max_value=3.0, value=1.0, step=0.1)
+    config = MomentConfig(
+        appear_persist_frames=int(appear),
+        disappear_missing_frames=int(disappear),
+        stop_enter_frames=int(stop_enter),
+        stop_exit_frames=int(stop_exit),
+        near_enter_frames=int(near_enter),
+        near_exit_frames=int(near_exit),
+        approach_window=int(approach_window),
+        approach_reverse_frames=int(approach_reverse),
+        stop_speed_threshold=float(stop_speed),
+        movement_speed_threshold=float(movement_speed),
+        near_threshold=float(near_threshold),
+        near_threshold_exit=float(near_exit_threshold),
+        approach_drop_threshold=float(approach_drop),
+        speed_ema_alpha=float(ema_alpha),
+        merge_gap_sec=float(merge_gap),
+    )
+    config.validate()
+    return config
+
+
+def _moment_rows(moments: list[Moment]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for moment in moments:
+        rows.append(
+            {
+                "type": moment.type,
+                "start_time": round(moment.start_time, 3),
+                "end_time": round(moment.end_time, 3),
+                "duration_sec": round(max(0.0, moment.end_time - moment.start_time), 3),
+                "entities": ",".join(str(entity) for entity in moment.entities),
+                "metadata": json.dumps(moment.metadata, ensure_ascii=True, sort_keys=True),
+            }
+        )
+    return rows
+
+
 def _render_moment_lab() -> None:
     st.title("Moment Generator Lab")
     st.caption("Generate APPEAR, DISAPPEAR, STOP, NEAR, and APPROACH moments from tracking output.")
 
     source = st.radio("Input source", options=["Sample data", "Upload JSON"], horizontal=True)
-
     if source == "Sample data":
         payload = _load_sample()
     else:
@@ -326,8 +681,7 @@ def _render_moment_lab() -> None:
             st.info("Upload a JSON file to continue.")
             return
         try:
-            raw_text = uploaded.read().decode("utf-8")
-            payload = _parse_uploaded(raw_text)
+            payload = _parse_uploaded(uploaded.read().decode("utf-8"))
         except Exception as exc:
             st.error(f"Could not parse uploaded JSON: {exc}")
             return
@@ -336,10 +690,10 @@ def _render_moment_lab() -> None:
     frame_height_default = int(payload.get("frame_height", 720))
     observations_raw = payload.get("observations", [])
 
-    col1, col2 = st.columns(2)
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         frame_width = st.number_input("Frame width", min_value=1, max_value=10000, value=frame_width_default, step=1)
-    with col2:
+    with c2:
         frame_height = st.number_input("Frame height", min_value=1, max_value=10000, value=frame_height_default, step=1)
 
     st.write(f"Loaded rows: **{len(observations_raw)}**")
@@ -347,16 +701,15 @@ def _render_moment_lab() -> None:
         st.dataframe(observations_raw[: min(50, len(observations_raw))], use_container_width=True)
 
     try:
-        config = _build_config()
+        config = _build_moment_config()
     except Exception as exc:
         st.error(f"Invalid config: {exc}")
         return
 
     if st.button("Generate Moments", type="primary"):
         try:
-            observations = _to_observations(observations_raw)
             moments = generate_moments(
-                observations=observations,
+                observations=_to_observations(observations_raw),
                 frame_width=int(frame_width),
                 frame_height=int(frame_height),
                 config=config,
@@ -366,21 +719,19 @@ def _render_moment_lab() -> None:
             return
 
         st.success(f"Generated {len(moments)} moments")
-        rows = _moment_rows(moments)
-        st.dataframe(rows, use_container_width=True)
-
+        st.dataframe(_moment_rows(moments), use_container_width=True)
         st.download_button(
             "Download moments JSON",
             data=json.dumps(
                 [
                     {
-                        "type": moment.type,
-                        "start_time": moment.start_time,
-                        "end_time": moment.end_time,
-                        "entities": moment.entities,
-                        "metadata": moment.metadata,
+                        "type": row.type,
+                        "start_time": row.start_time,
+                        "end_time": row.end_time,
+                        "entities": row.entities,
+                        "metadata": row.metadata,
                     }
-                    for moment in moments
+                    for row in moments
                 ],
                 indent=2,
                 ensure_ascii=True,
@@ -392,8 +743,10 @@ def _render_moment_lab() -> None:
 
 def main() -> None:
     st.set_page_config(page_title="LocalLens Dev UI", layout="wide")
-    mode = st.sidebar.radio("View", options=["Cycle Inspector", "Moment Lab"], index=0)
-    if mode == "Cycle Inspector":
+    mode = st.sidebar.radio("View", options=["Pipeline Runner", "Cycle Inspector", "Moment Lab"], index=0)
+    if mode == "Pipeline Runner":
+        _render_pipeline_runner()
+    elif mode == "Cycle Inspector":
         _render_cycle_inspector()
     else:
         _render_moment_lab()
