@@ -225,28 +225,7 @@ def _render_pipeline_runner() -> None:
     st.title("Video Pipeline Runner")
     st.caption("Autopilot run: YOLO-World + tracking + VLM captions + moment index with minimal inputs.")
 
-    if "video_a" not in st.session_state:
-        st.session_state["video_a"] = ""
-    if "video_b" not in st.session_state:
-        st.session_state["video_b"] = ""
-    if "active_video" not in st.session_state:
-        st.session_state["active_video"] = ""
-
-    with st.expander("Quick Video Presets", expanded=False):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.session_state["video_a"] = st.text_input("Video A", value=st.session_state["video_a"])
-            if st.button("Use Video A"):
-                st.session_state["active_video"] = st.session_state["video_a"]
-        with col_b:
-            st.session_state["video_b"] = st.text_input("Video B", value=st.session_state["video_b"])
-            if st.button("Use Video B"):
-                st.session_state["active_video"] = st.session_state["video_b"]
-        st.caption("Use these to store two video paths and switch between them quickly.")
-
-    video_default = st.session_state.get("active_video", "")
-    if not video_default:
-        video_default = str(DEFAULT_RUN_DIR / "video.mp4")
+    video_default = st.session_state.get("last_video_path", str(DEFAULT_RUN_DIR / "video.mp4"))
 
     video_path_text = st.text_input("Video path", value=video_default)
     c1, c2 = st.columns(2)
@@ -392,6 +371,7 @@ def _render_pipeline_runner() -> None:
 
             st.session_state["last_summary"] = summary
             st.session_state["last_phase_outputs_path"] = summary.get("phase_outputs")
+            st.session_state["last_video_path"] = str(video_path)
             st.success("Pipeline run completed.")
         except Exception as exc:
             st.error(f"Pipeline failed: {exc}")
