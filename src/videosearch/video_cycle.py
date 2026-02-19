@@ -64,6 +64,10 @@ KNOWN_COLOR_TERMS = (
     "silver",
     "gold",
 )
+DEFAULT_TRACK_COLOR_PROMPT = (
+    "Return only one word for the dominant visible vehicle color from this crop: "
+    "white, black, red, blue, green, yellow, orange, brown, gray, silver, gold, unknown."
+)
 
 
 @dataclass(slots=True)
