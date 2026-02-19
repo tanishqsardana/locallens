@@ -543,7 +543,7 @@ def _render_semantic_query_panel(db_path: Path, *, key_prefix: str) -> None:
         ordered_rows = sorted(
             [row for row in clip_rows if isinstance(row, Mapping)],
             key=lambda row: int(row.get("rank", 0)),
-            reverse=True,
+            reverse=False,
         )
         for row in ordered_rows:
             if not isinstance(row, Mapping):
