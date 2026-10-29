@@ -7,6 +7,16 @@ It supports two related workflows:
 - **Transcript search:** index timestamped transcript segments and retrieve them with natural-language queries.
 - **Video moment search:** process video plus detections/tracks, generate visual moments, inspect keyframes, search the moment index, and export short verification clips.
 
+## Demo
+
+Drop in a video, detect and track objects, then search the generated moments.
+
+
+
+https://github.com/user-attachments/assets/3df25c35-fcf7-4a8f-8716-7d72b34727d9
+
+
+
 ## Requirements
 
 - Python 3.10+
