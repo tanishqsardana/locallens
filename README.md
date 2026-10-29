@@ -1,28 +1,191 @@
-# locallens
+# LocalLens
 
-Domain-adaptable semantic search over video transcripts.
+LocalLens turns a video into searchable, reviewable events. It samples frames, detects and tracks objects, derives moments such as `APPEAR`, `DISAPPEAR`, `STOP`, `NEAR`, and `APPROACH`, and stores the result in a local SQLite index.
 
-This starter gives you:
-- Transcript ingestion from JSON files
-- Configurable chunking (global + per-domain overrides)
-- Pluggable embedders (`sentence-transformer` for semantic quality, `hashing` fallback)
-- SQLite vector index with cosine retrieval
-- CLI for indexing and search
+It supports two related workflows:
 
-## Quick Start
+- **Transcript search:** index timestamped transcript segments and retrieve them with natural-language queries.
+- **Video moment search:** process video plus detections/tracks, generate visual moments, inspect keyframes, search the moment index, and export short verification clips.
+
+## Requirements
+
+- Python 3.10+
+- For video processing: FFmpeg and a supported OpenCV video backend
+- For YOLO-World detection: a compatible PyTorch/Ultralytics runtime; GPU acceleration is optional but recommended
+- For generated captions or vocabulary refinement: an OpenAI-compatible vision-language endpoint
+
+The default video configuration targets a CUDA machine and a local VLM endpoint. On a CPU or Apple Silicon machine, change **Detector device** in the app or pass the appropriate CLI option (for example, `--yoloworld-device mps`).
+
+## Install
+
+Install the base package:
 
 ```bash
 python -m pip install -e .
 ```
 
-Optional (better semantic quality):
+Install the web application and video-processing dependencies:
+
+```bash
+python -m pip install -e ".[app,video]"
+```
+
+Optional: use a sentence-transformer model rather than the lightweight hashing embedder for semantic retrieval:
+
 ```bash
 python -m pip install -e ".[semantic]"
 ```
 
-Index sample videos:
+## Run the web app
+
 ```bash
-PYTHONPATH=src python -m videosearch.cli index \
+streamlit run streamlit_app.py
+```
+
+Open **Pipeline Runner**, then drag a video onto the upload area (or click it to browse). LocalLens previews the selected file before processing it. It accepts MP4, MOV, MKV, AVI, WebM, and M4V files; the included Streamlit configuration raises the upload limit to 1 GB.
+
+Choose **Run Full Pipeline** to create a run in `data/video_runs/<video-name>/`. The default pipeline uses YOLO-World and VLM captions. Expand **Advanced** to:
+
+- select `cpu`, `cuda`, or `mps` for the detector;
+- turn off **Generate VLM captions** when no vision-language endpoint is available;
+- turn off vocabulary refinement independently;
+- select `hashing` or `sentence-transformer` for the searchable text index.
+
+After a run, use **Semantic Query** to find the top three matching moments and generate playable clips. **Cycle Inspector** reopens an earlier run; **Moment Lab** is for experimenting with tracking JSON and moment thresholds.
+
+## Video pipeline
+
+```text
+video
+  -> sampled frames
+  -> optional VLM captions and vocabulary
+  -> detections and tracking
+  -> normalized tracks
+  -> moments
+  -> keyframes and embeddings
+  -> SQLite semantic index
+  -> search and verification clips
+```
+
+The pipeline accepts exactly one tracking source:
+
+| Source | CLI option | Use it when |
+| --- | --- | --- |
+| Existing tracks | `--tracks tracks.json` | A tracker has already run. |
+| ByteTrack MOT output | `--bytetrack-txt results.txt` | You have standard MOT-format output. |
+| Frame detections | `--detections detections.json` | LocalLens should perform simple IoU tracking. |
+| YOLO-World | `--auto-detections-yoloworld` | LocalLens should detect and track objects. |
+| GroundingDINO | `--auto-detections-groundingdino` | You have the GroundingDINO config and weights. |
+
+### Run from the command line
+
+The repository includes `config/video_cycle.defaults.json`, which is automatically applied unless disabled. It enables YOLO-World, VLM captions, and VLM vocabulary refinement.
+
+With the default stack configured:
+
+```bash
+python -m videosearch.video_cycle_cli \
+  --video /path/to/video.mp4 \
+  --out-dir data/video_cycle_run \
+  --show-phase-outputs
+```
+
+To process an existing tracking export without requiring a VLM endpoint, opt out of the defaults:
+
+```bash
+python -m videosearch.video_cycle_cli \
+  --no-default-config \
+  --video /path/to/video.mp4 \
+  --tracks /path/to/tracks.json \
+  --out-dir data/video_cycle_run
+```
+
+To run YOLO-World with no captions (for example, on Apple Silicon):
+
+```bash
+python -m videosearch.video_cycle_cli \
+  --no-default-config \
+  --video /path/to/video.mp4 \
+  --auto-detections-yoloworld \
+  --yoloworld-device mps \
+  --out-dir data/video_cycle_run
+```
+
+Pass `--config path/to/config.json` to use another settings file. Explicit CLI options override configuration values.
+
+### Input data
+
+Track JSON may be either a list of rows or an object with an `observations` array. Each row needs equivalent fields for:
+
+```json
+{
+  "track_id": 7,
+  "class": "car",
+  "bbox": [100, 200, 180, 260],
+  "confidence": 0.92,
+  "frame_idx": 42,
+  "time_sec": 1.4
+}
+```
+
+Accepted aliases include `id` for `track_id`, `label` for `class`, `xyxy` for `bbox`, `score` for `confidence`, `frame` for `frame_idx`, and `timestamp` for `time_sec`.
+
+### Run artifacts
+
+Each run writes its source inputs and derived files to its output directory. The most useful artifacts are:
+
+- `ingest/video_manifest.json` and `ingest/sampled_frames.json`
+- `normalized_tracks.json` and `tracks_report.json`
+- `moments.json` and `moment_keyframes.json`
+- `moment_index.sqlite`
+- `phase_outputs.json` for inspection in the web app
+
+VLM-enabled runs can also produce `vlm_captions_generated.json`, `vocabulary.json`, and `vocab_postprocess.json`. Detector-driven runs store generated detections and `tracked_rows.json`.
+
+## Search moments and export clips
+
+Search a completed video run from the command line:
+
+```bash
+python -m videosearch.moment_semantic_cli search \
+  --run-dir data/video_cycle_run \
+  --query "truck enters the scene" \
+  --top-k 8
+```
+
+Query structured events directly:
+
+```bash
+python -m videosearch.moment_query_cli appear \
+  --run-dir data/video_cycle_run \
+  --label truck
+```
+
+Render a video with moment overlays:
+
+```bash
+python -m videosearch.moment_overlay_cli \
+  --video /path/to/video.mp4 \
+  --run-dir data/video_cycle_run \
+  --out-video data/video_cycle_run/moment_overlay.mp4
+```
+
+Export clips for appearances of one label:
+
+```bash
+python -m videosearch.moment_clip_cli \
+  --video /path/to/video.mp4 \
+  --run-dir data/video_cycle_run \
+  --label truck \
+  --out-dir data/video_cycle_run/truck_episode_clips
+```
+
+## Transcript search
+
+Index the provided examples with the dependency-free hashing embedder:
+
+```bash
+python -m videosearch.cli index \
   --input-dir examples/transcripts \
   --db data/video_index.sqlite \
   --policy config/domain_chunking.json \
@@ -30,27 +193,18 @@ PYTHONPATH=src python -m videosearch.cli index \
   --recreate
 ```
 
-Search:
+Search the index:
+
 ```bash
-PYTHONPATH=src python -m videosearch.cli search \
+python -m videosearch.cli search \
   --db data/video_index.sqlite \
   --query "How do I reduce risk in a volatile portfolio?" \
-  --top-k 3 \
   --domain finance \
+  --top-k 3 \
   --embedder hashing
 ```
 
-To use transformer embeddings:
-```bash
-PYTHONPATH=src python -m videosearch.cli index \
-  --embedder sentence-transformer \
-  --model sentence-transformers/all-MiniLM-L6-v2 \
-  --recreate
-```
-
-## Transcript Schema
-
-Each input file in `examples/transcripts/*.json`:
+Transcript JSON must include a video identifier, metadata, and timestamped `segments`:
 
 ```json
 {
@@ -58,433 +212,26 @@ Each input file in `examples/transcripts/*.json`:
   "title": "Portfolio Basics for Volatile Markets",
   "domain": "finance",
   "url": "https://example.com/videos/fin-001",
-  "metadata": { "speaker": "Analyst Team" },
-  "segments": [
-    { "start": 0.0, "end": 11.2, "text": "..." }
-  ]
+  "metadata": {"speaker": "Analyst Team"},
+  "segments": [{"start": 0.0, "end": 11.2, "text": "..."}]
 }
 ```
 
-`domain` is first-class and can be used for:
-- Per-domain chunking policy
-- Query-time filtering
-- Routing to domain-specific rerankers (next step)
+## Project layout
 
-## Domain Adaptation Hooks
+| Path | Purpose |
+| --- | --- |
+| `streamlit_app.py` | Upload, inspect, query, and clip-export interface. |
+| `src/videosearch/video_cycle.py` | End-to-end video pipeline. |
+| `src/videosearch/moments.py` | Rule-based moment generation from tracks. |
+| `src/videosearch/*_cli.py` | Pipeline, query, clip, overlay, and semantic CLI commands. |
+| `src/videosearch/pipeline.py` | Transcript indexing and retrieval orchestration. |
+| `config/` | Domain chunking and video pipeline defaults. |
+| `examples/` | Transcript, track, caption, and synonym examples. |
+| `tests/` | Unit tests for indexing, moments, query, overlay, clips, and video helpers. |
 
-1. Chunking policy in `config/domain_chunking.json`:
-   - `default` for all domains
-   - `domains.<name>` overrides for specific verticals (medical, finance, etc.)
-2. Embedder abstraction in `src/videosearch/embedders.py`:
-   - Add new embedders without touching indexing/search code.
-3. Storage abstraction in `src/videosearch/store.py`:
-   - Swap SQLite for FAISS/Qdrant/Weaviate once scale grows.
-
-## Project Layout
-
-- `src/videosearch/cli.py`: CLI entrypoint (`index`, `search`)
-- `src/videosearch/pipeline.py`: end-to-end indexing/search orchestration
-- `src/videosearch/moments.py`: state-transition moment generation from tracked objects
-- `src/videosearch/chunking.py`: transcript chunking with overlap
-- `src/videosearch/embedders.py`: embedder interface + implementations
-- `src/videosearch/store.py`: SQLite vector store and cosine retrieval
-- `examples/transcripts/`: sample videos across domains
-- `tests/test_pipeline.py`: basic index + query test
-- `tests/test_moments.py`: moment generation tests for APPEAR/DISAPPEAR/STOP/NEAR/APPROACH
-
-## Run Tests
+## Test
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -q
 ```
-
-Current tests:
-- `tests/test_pipeline.py::VideoSemanticSearchTest::test_index_and_search`
-- `tests/test_moments.py::MomentGenerationTest::test_appear_and_disappear`
-- `tests/test_moments.py::MomentGenerationTest::test_stop_event_from_speed_transition`
-- `tests/test_moments.py::MomentGenerationTest::test_near_moments_are_merged_when_gap_is_small`
-- `tests/test_moments.py::MomentGenerationTest::test_approach_event_from_decreasing_distance`
-
-## Streamlit Moment Lab
-
-Install app dependencies:
-
-```bash
-python -m pip install -e ".[app]"
-```
-
-Run:
-
-```bash
-PYTHONPATH=src streamlit run streamlit_app.py
-```
-
-The app supports:
-- Built-in sample (`examples/tracks/sample_static_scene.json`)
-- Uploading your own JSON tracking outputs
-- Interactive threshold tuning for APPEAR/DISAPPEAR/STOP/NEAR/APPROACH
-- Exporting generated moments as JSON
-
-The app now has two views in the sidebar:
-- `Cycle Inspector`: load and inspect `phase_outputs.json` with phase tabs and keyframe previews
-- `Moment Lab`: run moment generation directly from tracking rows
-
-## Full Video Cycle (Video -> Moments -> Keyframes -> Index)
-
-### CV Architecture (Short)
-
-```text
-Input video -> frame sampling (ingest) -> VLM tag discovery -> open-vocab detection (YOLO-World / GroundingDINO) -> object tracking -> moment generation -> keyframe extraction -> embeddings + semantic index -> retrieval
-```
-
-`embeddings + semantic index` means:
-- Visual moment embedding:
-  - extract `start/middle/end` keyframes per moment
-  - compute `histogram-rgb-16` feature per keyframe
-  - average-pool keyframe vectors into one vector per moment
-- Semantic text embedding:
-  - build a short text summary per moment (type, label, timing, metadata)
-  - embed summary text (`hashing` or `sentence-transformer`)
-- Index storage:
-  - persist moments + vectors in `moment_index.sqlite`
-  - semantic retrieval runs cosine similarity over text vectors and returns top-k moments
-  - UI then shows middle-frame previews and optional clip exports for verification
-
-Install video dependencies:
-
-```bash
-python -m pip install -e ".[video]"
-```
-
-Run the full cycle:
-
-```bash
-PYTHONPATH=src python -m videosearch.video_cycle_cli \
-  --video /path/to/video.mp4 \
-  --tracks /path/to/tracks.json \
-  --out-dir data/video_cycle_run \
-  --captions /path/to/vlm_captions.json \
-  --synonyms /path/to/synonyms.json \
-  --seed-labels car,truck,person \
-  --target-fps 10 \
-  --show-phase-outputs
-```
-
-Use a JSON config file for default hyperparameters (CLI flags still override):
-
-```bash
-PYTHONPATH=src python -m videosearch.video_cycle_cli \
-  --config config/video_cycle.defaults.json \
-  --video /path/to/video.mp4 \
-  --show-phase-outputs
-```
-
-Example config template: `config/video_cycle.defaults.json`
-
-Tip: Streamlit also reads `config/video_cycle.defaults.json` for runner defaults
-(`vlm_*`, `yoloworld_*`, tracking thresholds, semantic settings, `scene_profile`) and `semantic_clip_order` (`"123"` or `"321"`).
-
-If `config/video_cycle.defaults.json` exists, CLI automatically uses it even without `--config`.
-
-Or run tracking in-pipeline from frame-level detections:
-
-```bash
-PYTHONPATH=src python -m videosearch.video_cycle_cli \
-  --video /path/to/video.mp4 \
-  --detections /path/to/detections.json \
-  --out-dir data/video_cycle_run \
-  --detect-track-iou-threshold 0.3 \
-  --detect-track-max-missed-frames 10 \
-  --show-phase-outputs
-```
-
-Run YOLO-World detections + tracking in one pipeline command:
-
-```bash
-PYTHONPATH=src python -m videosearch.video_cycle_cli \
-  --video /path/to/video.mp4 \
-  --auto-detections-yoloworld \
-  --yoloworld-model yolov8s-worldv2.pt \
-  --yoloworld-confidence 0.2 \
-  --yoloworld-device cuda \
-  --out-dir data/video_cycle_run \
-  --auto-captions \
-  --vlm-endpoint http://localhost:8000/v1/chat/completions \
-  --vlm-model nvidia/Qwen2.5-VL-7B-Instruct-NVFP4 \
-  --llm-postprocess-vocab \
-  --detect-track-iou-threshold 0.3 \
-  --detect-track-max-missed-frames 10 \
-  --log-progress \
-  --show-phase-outputs
-```
-
-Run GroundingDINO detections + tracking in one pipeline command:
-
-```bash
-PYTHONPATH=src python -m videosearch.video_cycle_cli \
-  --video /path/to/video.mp4 \
-  --auto-detections-groundingdino \
-  --groundingdino-config-path /path/to/GroundingDINO_SwinT_OGC.py \
-  --groundingdino-weights-path /path/to/groundingdino_swint_ogc.pth \
-  --out-dir data/video_cycle_run \
-  --auto-captions \
-  --vlm-endpoint http://localhost:8000/v1/chat/completions \
-  --vlm-model nvidia/Qwen2.5-VL-7B-Instruct-NVFP4 \
-  --llm-postprocess-vocab \
-  --detect-track-iou-threshold 0.3 \
-  --detect-track-max-missed-frames 10 \
-  --show-phase-outputs
-```
-
-Phase 3 track processing controls:
-- `--track-min-confidence` (drop low-confidence rows)
-- `--track-min-length` (drop short tracks)
-- `--track-max-interp-gap` (optional interpolation for short missing gaps)
-- `--track-no-clip-bbox` (disable bbox clipping to frame bounds)
-- `--moment-labels` (default: `car,truck,bus,van,person,motorcycle`; filters out static/background classes)
-
-Phase 6/7 semantic indexing controls:
-- `--semantic-index-embedder` (`hashing` or `sentence-transformer`)
-- `--semantic-index-model` (optional model name for selected embedder)
-- `--disable-semantic-index` (skip text-semantic indexing)
-
-Auto-generate captions from a local vLLM VLM endpoint (OpenAI-compatible):
-
-```bash
-PYTHONPATH=src python -m videosearch.video_cycle_cli \
-  --video /path/to/video.mp4 \
-  --bytetrack-txt /path/to/bytetrack_results.txt \
-  --out-dir data/video_cycle_run \
-  --auto-captions \
-  --vlm-endpoint http://localhost:8000/v1/chat/completions \
-  --vlm-model Qwen/Qwen2.5-VL-7B-Instruct \
-  --vlm-frame-stride 10 \
-  --vlm-max-tokens 120 \
-  --llm-postprocess-vocab \
-  --llm-postprocess-max-detection-terms 20 \
-  --show-phase-outputs
-```
-
-If you already ran ByteTrack and have MOT txt output:
-
-```bash
-PYTHONPATH=src python -m videosearch.video_cycle_cli \
-  --video /path/to/video.mp4 \
-  --bytetrack-txt /path/to/bytetrack_results.txt \
-  --bytetrack-class car \
-  --out-dir data/video_cycle_run \
-  --show-phase-outputs
-```
-
-Pipeline artifacts:
-- `data/video_cycle_run/ingest/video_manifest.json`
-- `data/video_cycle_run/ingest/sampled_frames.json`
-- `data/video_cycle_run/vocabulary.json` (if captions are provided)
-- `data/video_cycle_run/vlm_captions_generated.json` (if `--auto-captions` is used)
-- `data/video_cycle_run/vocab_postprocess.json` (if `--llm-postprocess-vocab` is used)
-- `data/video_cycle_run/tracked_rows.json` (if `--detections` is used)
-- `data/video_cycle_run/yoloworld_detections_generated.json` (if `--auto-detections-yoloworld` is used)
-- `data/video_cycle_run/groundingdino_detections_generated.json` (if `--auto-detections-groundingdino` is used)
-- `data/video_cycle_run/normalized_tracks.json`
-- `data/video_cycle_run/tracks_report.json`
-- `data/video_cycle_run/moments.json`
-- `data/video_cycle_run/moment_keyframes.json`
-- `data/video_cycle_run/moment_index.sqlite`
-- `data/video_cycle_run/phase_outputs.json` (phase-by-phase debug payload)
-
-When captions are available, moment metadata can include VLM-derived color descriptors:
-- `metadata.color_tags` (e.g., `["white", "red"]`)
-- `metadata.color_label_tags` (e.g., `["white car"]`)
-
-For full untruncated phase payloads during development:
-
-```bash
-PYTHONPATH=src python -m videosearch.video_cycle_cli \
-  --video /path/to/video.mp4 \
-  --tracks /path/to/tracks.json \
-  --out-dir data/video_cycle_run \
-  --show-full-phase-outputs
-```
-
-Track JSON input can be either:
-- list of rows, or
-- object with `observations` list.
-
-Each row must contain equivalents of:
-- `track_id` (or `id`)
-- `class` (or `label` / `class_name` / `cls`)
-- `bbox` `[x1,y1,x2,y2]` (or `xyxy`)
-- `confidence` (or `score` / `conf`)
-- `frame_idx` (or `frame` / `frame_id`)
-- `time_sec` (or `timestamp` / `time`)
-
-`--tracks`, `--bytetrack-txt`, `--detections`, `--auto-detections-groundingdino`, and `--auto-detections-yoloworld` are mutually exclusive.
-Provide exactly one.
-`--captions` and `--auto-captions` are mutually exclusive.
-
-## Moment Generation (Tracking Output -> Events)
-
-`src/videosearch/moments.py` builds structured moments from tracking outputs only
-(no VLM timestamping). Input per detection:
-`track_id`, `class`, `bbox`, `confidence`, `frame_idx`, `time_sec`.
-
-```python
-from videosearch.moments import MomentConfig, generate_moments
-
-rows = [
-  {
-    "track_id": 7,
-    "class": "car",
-    "bbox": [100, 200, 180, 260],
-    "confidence": 0.92,
-    "frame_idx": 42,
-    "time_sec": 1.4
-  }
-]
-
-moments = generate_moments(
-  observations=rows,
-  frame_width=1920,
-  frame_height=1080,
-  config=MomentConfig()
-)
-```
-
-Returned moments:
-- `APPEAR` and `DISAPPEAR`
-- `STOP`
-- `NEAR`
-- `APPROACH`
-- `TRAFFIC_CHANGE`
-
-`DISAPPEAR` is emitted as a point event once missing-frame threshold is reached.
-`APPEAR` continuity tolerates short frame gaps (useful when ingest FPS is lower than source FPS).
-
-All distances are normalized by frame diagonal. Speed uses EMA smoothing.
-Overlapping/adjacent moments with gap `< 1s` are merged.
-
-## Operational Query Layer
-
-Query the generated moment/track artifacts for questions like:
-- "when does truck appear?"
-- "which frames contain truck?"
-- "when does this car pass through?"
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_query_cli appear \
-  --run-dir data/video_cycle_run \
-  --label truck
-```
-
-`appear` now returns:
-- `appear_events` (raw APPEAR moments per track)
-- `episodes` (track-instance windows from frame ranges, default per-track)
-
-Optional color filter (uses VLM-derived tags in moment metadata):
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_query_cli appear \
-  --run-dir data/video_cycle_run \
-  --label truck \
-  --color white
-```
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_query_cli frames-with \
-  --run-dir data/video_cycle_run \
-  --label truck
-```
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_query_cli pass-through \
-  --run-dir data/video_cycle_run \
-  --label car \
-  --frame-width 3840 \
-  --frame-height 2160
-```
-
-Simple NLQ router:
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_query_cli nlq \
-  --run-dir data/video_cycle_run \
-  --query "when does truck appear?" \
-  --frame-width 3840 \
-  --frame-height 2160
-```
-
-## Moment Overlay Video (Verification UI)
-
-Render an MP4 overlay to visually verify moments against tracks:
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_overlay_cli \
-  --video /path/to/video.mp4 \
-  --run-dir data/video_cycle_run \
-  --out-video data/video_cycle_run/moment_overlay.mp4 \
-  --log-every-frames 60
-```
-
-Useful flags:
-- `--show-all-tracks` (draw every track, not only active moment entities)
-- `--start-sec` / `--end-sec` (render only a time slice)
-
-## Episode Clip Export (Per Label)
-
-Export cropped-in-time MP4 clips for appearance episodes, with optional bbox overlays:
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_clip_cli \
-  --video /path/to/video.mp4 \
-  --run-dir data/video_cycle_run \
-  --label truck \
-  --out-dir data/video_cycle_run/truck_episode_clips \
-  --padding-sec 0.3 \
-  --max-gap-frames 2 \
-  --min-episode-frames 2
-```
-
-Output:
-- One MP4 per detected episode window.
-- `*_episode_clips_summary.json` with frame/time ranges, track IDs, and clip paths.
-
-Optional color-aware clip export (uses VLM-derived moment tags):
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_clip_cli \
-  --video /path/to/video.mp4 \
-  --run-dir data/video_cycle_run \
-  --label car \
-  --color white \
-  --out-dir data/video_cycle_run/white_car_episode_clips
-```
-
-Note:
-- Episode generation is per-track by default (avoids one long "car present" clip on busy roads).
-- Add `--label-union-episodes` if you want legacy merged label-presence windows.
-
-## Semantic Search + LLM QA (Moment Index)
-
-Semantic retrieval over indexed moment summaries:
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_semantic_cli search \
-  --run-dir data/video_cycle_run \
-  --query "truck enters the scene" \
-  --top-k 8
-```
-
-Grounded LLM answer (retrieval context is passed to LLM):
-
-```bash
-PYTHONPATH=src python -m videosearch.moment_semantic_cli ask \
-  --run-dir data/video_cycle_run \
-  --query "When does a truck appear?" \
-  --top-k 12 \
-  --llm-endpoint http://localhost:8000/v1/chat/completions \
-  --llm-model nvidia/Qwen2.5-VL-7B-Instruct-NVFP4
-```
-
-Design note:
-- Rules are still used to cut clean moments/clips.
-- Semantic search and LLM are used to retrieve/explain those moments, not to define raw timestamps.

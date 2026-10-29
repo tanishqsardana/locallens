@@ -769,7 +769,7 @@ def _render_phase_payload(payload: Mapping[str, Any], *, preview_limit: int = 30
 
 def _render_pipeline_runner() -> None:
     st.title("Video Pipeline Runner")
-    st.caption("Autopilot run: YOLO-World + tracking + VLM captions + moment index with minimal inputs.")
+    st.caption("Drop in a video, detect and track objects, then search the generated moments.")
     defaults_cfg = _load_video_cycle_defaults(str(DEFAULT_VIDEO_CYCLE_CONFIG))
 
     existing_runs = _list_existing_runs(_expand_path("data/video_runs"))
@@ -800,13 +800,14 @@ def _render_pipeline_runner() -> None:
 
     st.session_state.setdefault("last_video_name", "")
     uploaded_video = st.file_uploader(
-        "Select video file",
+        "Drop a video here or click to browse",
         type=["mp4", "mov", "mkv", "avi", "webm", "m4v"],
         accept_multiple_files=False,
-        help="Pick a local video file from your system.",
+        help="Supported formats: MP4, MOV, MKV, AVI, WebM, and M4V. Uploaded files are saved only in this run's inputs folder.",
     )
     if uploaded_video is not None:
         st.session_state["last_video_name"] = str(uploaded_video.name)
+        st.video(uploaded_video)
     if st.session_state["last_video_name"]:
         st.caption(f"Selected: `{st.session_state['last_video_name']}`")
 
@@ -882,6 +883,17 @@ def _render_pipeline_runner() -> None:
                 "Semantic model (optional)",
                 value=_cfg_str(defaults_cfg, "semantic_index_model", ""),
             )
+            generate_captions = st.checkbox(
+                "Generate VLM captions",
+                value=_cfg_bool(defaults_cfg, "auto_captions", True),
+                help="Requires a reachable OpenAI-compatible vision-language endpoint. Turn this off to run detection, tracking, and moment generation locally.",
+            )
+            refine_vocabulary = st.checkbox(
+                "Refine detected vocabulary with the VLM",
+                value=_cfg_bool(defaults_cfg, "llm_postprocess_vocab", True),
+                disabled=not generate_captions,
+                help="Uses the same endpoint to turn caption terms into detector prompts.",
+            )
             show_full_phase_outputs = st.checkbox(
                 "Include full phase outputs",
                 value=_cfg_bool(defaults_cfg, "show_full_phase_outputs", False),
@@ -896,6 +908,10 @@ def _render_pipeline_runner() -> None:
         semantic_embedder = "hashing"
     if "semantic_model" not in locals():
         semantic_model = ""
+    if "generate_captions" not in locals():
+        generate_captions = _cfg_bool(defaults_cfg, "auto_captions", True)
+    if "refine_vocabulary" not in locals():
+        refine_vocabulary = _cfg_bool(defaults_cfg, "llm_postprocess_vocab", True)
     if "show_full_phase_outputs" not in locals():
         show_full_phase_outputs = _cfg_bool(defaults_cfg, "show_full_phase_outputs", False)
     if "log_progress" not in locals():
@@ -952,20 +968,22 @@ def _render_pipeline_runner() -> None:
             )
             yoloworld_cfg.validate()
 
-            vlm_cfg = VLMCaptionConfig(
-                endpoint=str(vlm_endpoint),
-                model=str(vlm_model),
-                prompt=str(vlm_prompt),
-                max_tokens=int(_cfg_int(defaults_cfg, "vlm_max_tokens", 120)),
-                frame_stride=int(vlm_frame_stride),
-                timeout_sec=float(_cfg_float(defaults_cfg, "vlm_timeout_sec", 60.0)),
-                temperature=float(_cfg_float(defaults_cfg, "vlm_temperature", 0.0)),
-                api_key=None,
-            )
-            vlm_cfg.validate()
+            vlm_cfg = None
+            if generate_captions:
+                vlm_cfg = VLMCaptionConfig(
+                    endpoint=str(vlm_endpoint),
+                    model=str(vlm_model),
+                    prompt=str(vlm_prompt),
+                    max_tokens=int(_cfg_int(defaults_cfg, "vlm_max_tokens", 120)),
+                    frame_stride=int(vlm_frame_stride),
+                    timeout_sec=float(_cfg_float(defaults_cfg, "vlm_timeout_sec", 60.0)),
+                    temperature=float(_cfg_float(defaults_cfg, "vlm_temperature", 0.0)),
+                    api_key=None,
+                )
+                vlm_cfg.validate()
 
             llm_vocab_cfg = None
-            if _cfg_bool(defaults_cfg, "llm_postprocess_vocab", True):
+            if generate_captions and refine_vocabulary:
                 llm_vocab_cfg = LLMVocabPostprocessConfig(
                     endpoint=str(vlm_endpoint),
                     model=str(vlm_model),

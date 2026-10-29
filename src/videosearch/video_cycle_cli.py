@@ -120,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional JSON config with default CLI values (CLI flags still take priority)",
     )
+    parser.add_argument(
+        "--no-default-config",
+        action="store_true",
+        help="Do not load config/video_cycle.defaults.json automatically.",
+    )
     parser.add_argument("--video", default=None, help="Input video path")
     parser.add_argument("--tracks", default=None, help="Tracking output JSON path")
     parser.add_argument("--bytetrack-txt", default=None, help="ByteTrack MOT txt path")
@@ -301,7 +306,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     config_path = getattr(args, "config", None)
-    if not config_path and DEFAULT_CLI_CONFIG_PATH.exists():
+    if not config_path and not args.no_default_config and DEFAULT_CLI_CONFIG_PATH.exists():
         config_path = str(DEFAULT_CLI_CONFIG_PATH)
     cli_config = _load_cli_config(config_path)
     args = _apply_config_defaults(args=args, parser=parser, config=cli_config)
